@@ -11,3 +11,4 @@ use crate::common::*;
 mod attrs_state;
 mod lifecycle;
 mod secinfo_verify;
+mod xattrs;

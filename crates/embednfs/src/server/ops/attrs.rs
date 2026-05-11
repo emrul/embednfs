@@ -27,6 +27,9 @@ impl<F: FileSystem> NfsServer<F> {
                     | ACCESS4_EXTEND
                     | ACCESS4_DELETE
                     | ACCESS4_EXECUTE;
+                if self.capabilities().xattrs {
+                    server_supported |= ACCESS4_XAREAD | ACCESS4_XAWRITE | ACCESS4_XALIST;
+                }
                 if matches!(
                     attr.file_type,
                     ServerFileType::Directory | ServerFileType::NamedAttrDir

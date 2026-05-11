@@ -397,6 +397,15 @@ impl<F: FileSystem> NfsServer<F> {
         if bits & ACCESS4_EXECUTE != 0 {
             out |= AccessMask::EXECUTE;
         }
+        if bits & ACCESS4_XAREAD != 0 {
+            out |= AccessMask::XATTR_READ;
+        }
+        if bits & ACCESS4_XAWRITE != 0 {
+            out |= AccessMask::XATTR_WRITE;
+        }
+        if bits & ACCESS4_XALIST != 0 {
+            out |= AccessMask::XATTR_LIST;
+        }
         out
     }
 
@@ -419,6 +428,15 @@ impl<F: FileSystem> NfsServer<F> {
         }
         if mask.intersects(AccessMask::EXECUTE) {
             out |= ACCESS4_EXECUTE;
+        }
+        if mask.intersects(AccessMask::XATTR_READ) {
+            out |= ACCESS4_XAREAD;
+        }
+        if mask.intersects(AccessMask::XATTR_WRITE) {
+            out |= ACCESS4_XAWRITE;
+        }
+        if mask.intersects(AccessMask::XATTR_LIST) {
+            out |= ACCESS4_XALIST;
         }
         out
     }

@@ -356,6 +356,12 @@ impl AccessMask {
     pub const DELETE: Self = Self(1 << 4);
     /// Execute/search permission.
     pub const EXECUTE: Self = Self(1 << 5);
+    /// Read extended attribute values.
+    pub const XATTR_READ: Self = Self(1 << 6);
+    /// Modify extended attributes.
+    pub const XATTR_WRITE: Self = Self(1 << 7);
+    /// List extended attribute keys.
+    pub const XATTR_LIST: Self = Self(1 << 8);
 
     /// Returns the raw bit representation.
     pub fn bits(self) -> u32 {

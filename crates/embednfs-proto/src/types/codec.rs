@@ -524,6 +524,48 @@ impl XdrEncode for NfsResop4 {
                     res.digest.encode(dst);
                 }
             }
+            NfsResop4::Getxattr(status, value) => {
+                OP_GETXATTR.encode(dst);
+                status.encode(dst);
+                if *status == NfsStat4::Ok
+                    && let Some(value) = value
+                {
+                    value.encode(dst);
+                }
+            }
+            NfsResop4::Setxattr(status, cinfo) => {
+                OP_SETXATTR.encode(dst);
+                status.encode(dst);
+                if *status == NfsStat4::Ok
+                    && let Some(cinfo) = cinfo
+                {
+                    cinfo.encode(dst);
+                }
+            }
+            NfsResop4::Listxattrs(status, res) => {
+                OP_LISTXATTRS.encode(dst);
+                status.encode(dst);
+                if *status == NfsStat4::Ok
+                    && let Some(res) = res
+                {
+                    res.cookie.encode(dst);
+                    res.names.encode(dst);
+                    res.eof.encode(dst);
+                }
+            }
+            NfsResop4::Removexattr(status, cinfo) => {
+                OP_REMOVEXATTR.encode(dst);
+                status.encode(dst);
+                if *status == NfsStat4::Ok
+                    && let Some(cinfo) = cinfo
+                {
+                    cinfo.encode(dst);
+                }
+            }
+            NfsResop4::Unsupported(opnum, status) => {
+                opnum.encode(dst);
+                status.encode(dst);
+            }
             NfsResop4::Illegal(status) => {
                 OP_ILLEGAL.encode(dst);
                 status.encode(dst);
@@ -977,6 +1019,142 @@ fn decode_nfs_argop4(src: &mut Bytes) -> XdrResult<NfsArgop4> {
             }
             Ok(NfsArgop4::WantDelegation)
         }
+        OP_GETXATTR => Ok(NfsArgop4::Getxattr(GetxattrArgs4 {
+            name: String::decode(src)?,
+        })),
+        OP_SETXATTR => {
+            let option_raw = u32::decode(src)?;
+            let option = match option_raw {
+                0 => SetxattrOption4::Either,
+                1 => SetxattrOption4::Create,
+                2 => SetxattrOption4::Replace,
+                _ => return Err(XdrError::InvalidEnum(option_raw)),
+            };
+            Ok(NfsArgop4::Setxattr(SetxattrArgs4 {
+                option,
+                key: String::decode(src)?,
+                value: decode_opaque(src)?,
+            }))
+        }
+        OP_LISTXATTRS => Ok(NfsArgop4::Listxattrs(ListxattrsArgs4 {
+            cookie: u64::decode(src)?,
+            maxcount: u32::decode(src)?,
+        })),
+        OP_REMOVEXATTR => Ok(NfsArgop4::Removexattr(RemovexattrArgs4 {
+            name: String::decode(src)?,
+        })),
+        OP_ALLOCATE => {
+            decode_stateid_offset_length(src)?;
+            Ok(NfsArgop4::Unsupported(OP_ALLOCATE))
+        }
+        OP_COPY => {
+            let _src_stateid = Stateid4::decode(src)?;
+            let _dst_stateid = Stateid4::decode(src)?;
+            let _src_offset = u64::decode(src)?;
+            let _dst_offset = u64::decode(src)?;
+            let _count = u64::decode(src)?;
+            let _consecutive = bool::decode(src)?;
+            let _synchronous = bool::decode(src)?;
+            decode_netloc_list(src)?;
+            Ok(NfsArgop4::Unsupported(OP_COPY))
+        }
+        OP_COPY_NOTIFY => {
+            let _src_stateid = Stateid4::decode(src)?;
+            decode_netloc(src)?;
+            Ok(NfsArgop4::Unsupported(OP_COPY_NOTIFY))
+        }
+        OP_DEALLOCATE => {
+            decode_stateid_offset_length(src)?;
+            Ok(NfsArgop4::Unsupported(OP_DEALLOCATE))
+        }
+        OP_IO_ADVISE => {
+            let _stateid = Stateid4::decode(src)?;
+            let _offset = u64::decode(src)?;
+            let _count = u64::decode(src)?;
+            let _hints = Bitmap4::decode(src)?;
+            Ok(NfsArgop4::Unsupported(OP_IO_ADVISE))
+        }
+        OP_LAYOUTERROR => {
+            let _offset = u64::decode(src)?;
+            let _length = u64::decode(src)?;
+            let _stateid = Stateid4::decode(src)?;
+            let count = u32::decode(src)? as usize;
+            for _ in 0..count {
+                let _deviceid = decode_fixed_opaque(src, 16)?;
+                let _status = u32::decode(src)?;
+                let _opnum = u32::decode(src)?;
+            }
+            Ok(NfsArgop4::Unsupported(OP_LAYOUTERROR))
+        }
+        OP_LAYOUTSTATS => {
+            let _offset = u64::decode(src)?;
+            let _length = u64::decode(src)?;
+            let _stateid = Stateid4::decode(src)?;
+            let _read_count = u64::decode(src)?;
+            let _read_bytes = u64::decode(src)?;
+            let _write_count = u64::decode(src)?;
+            let _write_bytes = u64::decode(src)?;
+            let _deviceid = decode_fixed_opaque(src, 16)?;
+            let _layoutupdate = decode_opaque(src)?;
+            Ok(NfsArgop4::Unsupported(OP_LAYOUTSTATS))
+        }
+        OP_OFFLOAD_CANCEL => {
+            let _stateid = Stateid4::decode(src)?;
+            Ok(NfsArgop4::Unsupported(OP_OFFLOAD_CANCEL))
+        }
+        OP_OFFLOAD_STATUS => {
+            let _stateid = Stateid4::decode(src)?;
+            Ok(NfsArgop4::Unsupported(OP_OFFLOAD_STATUS))
+        }
+        OP_READ_PLUS => {
+            let _stateid = Stateid4::decode(src)?;
+            let _offset = u64::decode(src)?;
+            let _count = u32::decode(src)?;
+            Ok(NfsArgop4::Unsupported(OP_READ_PLUS))
+        }
+        OP_SEEK => {
+            let _stateid = Stateid4::decode(src)?;
+            let _offset = u64::decode(src)?;
+            let _what = u32::decode(src)?;
+            Ok(NfsArgop4::Unsupported(OP_SEEK))
+        }
+        OP_CLONE => {
+            let _src_stateid = Stateid4::decode(src)?;
+            let _dst_stateid = Stateid4::decode(src)?;
+            let _src_offset = u64::decode(src)?;
+            let _dst_offset = u64::decode(src)?;
+            let _count = u64::decode(src)?;
+            Ok(NfsArgop4::Unsupported(OP_CLONE))
+        }
         _ => Ok(NfsArgop4::Illegal),
     }
+}
+
+fn decode_stateid_offset_length(src: &mut Bytes) -> XdrResult<()> {
+    let _stateid = Stateid4::decode(src)?;
+    let _offset = u64::decode(src)?;
+    let _length = u64::decode(src)?;
+    Ok(())
+}
+
+fn decode_netloc_list(src: &mut Bytes) -> XdrResult<()> {
+    let count = u32::decode(src)? as usize;
+    for _ in 0..count {
+        decode_netloc(src)?;
+    }
+    Ok(())
+}
+
+fn decode_netloc(src: &mut Bytes) -> XdrResult<()> {
+    match u32::decode(src)? {
+        1 | 2 => {
+            let _name_or_url = String::decode(src)?;
+        }
+        3 => {
+            let _netid = String::decode(src)?;
+            let _addr = String::decode(src)?;
+        }
+        value => return Err(XdrError::InvalidEnum(value)),
+    }
+    Ok(())
 }

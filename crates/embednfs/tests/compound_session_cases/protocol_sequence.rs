@@ -18,17 +18,17 @@ async fn test_null_procedure() {
 
 // ===== COMPOUND basics =====
 
-/// COMPOUND with minorversion != 1 must return NFS4ERR_MINOR_VERS_MISMATCH.
+/// COMPOUND with unsupported minor versions must return NFS4ERR_MINOR_VERS_MISMATCH.
 /// Origin: `pynfs/nfs4.1/server41tests/st_compound.py` (CODE `COMP4a`, `COMP4b`).
 /// RFC: RFC 8881 §2.10.6.4.
 #[tokio::test]
-async fn test_minor_version_mismatch_rejects_non_v41() {
+async fn test_minor_version_mismatch_rejects_unsupported_minor_versions() {
     let port = start_server().await;
     let mut stream = connect(port).await;
     let rootfh_op = encode_putrootfh();
     let illegal_op = encode_illegal();
 
-    for (xid, minorversion, op) in [(1, 0u32, &rootfh_op[..]), (2, 2u32, &illegal_op[..])] {
+    for (xid, minorversion, op) in [(1, 0u32, &rootfh_op[..]), (2, 3u32, &illegal_op[..])] {
         let compound = encode_compound_minor("bad-minor", minorversion, &[op]);
         let mut resp = send_rpc(&mut stream, xid, 1, &compound).await;
         let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);

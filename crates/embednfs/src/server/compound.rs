@@ -32,7 +32,7 @@ impl<F: FileSystem> NfsServer<F> {
             op_names
         );
 
-        if args.minorversion != 1 {
+        if !matches!(args.minorversion, 1 | 2) {
             return Compound4Res {
                 status: NfsStat4::MinorVersMismatch,
                 tag: args.tag,
@@ -405,6 +405,21 @@ impl<F: FileSystem> NfsServer<F> {
             NfsArgop4::GetDeviceInfo => NfsResop4::GetDeviceInfo(NfsStat4::Notsupp, None),
             NfsArgop4::GetDeviceList => NfsResop4::GetDeviceList(NfsStat4::Notsupp, None),
             NfsArgop4::SetSsv => NfsResop4::SetSsv(NfsStat4::Notsupp, None),
+            NfsArgop4::Getxattr(args) => {
+                self.op_getxattr(request_ctx, args, &state.current_fh).await
+            }
+            NfsArgop4::Setxattr(args) => {
+                self.op_setxattr(request_ctx, args, &state.current_fh).await
+            }
+            NfsArgop4::Listxattrs(args) => {
+                self.op_listxattrs(request_ctx, args, &state.current_fh)
+                    .await
+            }
+            NfsArgop4::Removexattr(args) => {
+                self.op_removexattr(request_ctx, args, &state.current_fh)
+                    .await
+            }
+            NfsArgop4::Unsupported(opnum) => NfsResop4::Unsupported(*opnum, NfsStat4::Notsupp),
             NfsArgop4::Illegal => NfsResop4::Illegal(NfsStat4::OpIllegal),
         }
     }
@@ -539,6 +554,11 @@ fn error_res_for_op(op: &NfsArgop4, status: NfsStat4) -> NfsResop4 {
         NfsArgop4::GetDeviceInfo => NfsResop4::GetDeviceInfo(status, None),
         NfsArgop4::GetDeviceList => NfsResop4::GetDeviceList(status, None),
         NfsArgop4::SetSsv => NfsResop4::SetSsv(status, None),
+        NfsArgop4::Getxattr(_) => NfsResop4::Getxattr(status, None),
+        NfsArgop4::Setxattr(_) => NfsResop4::Setxattr(status, None),
+        NfsArgop4::Listxattrs(_) => NfsResop4::Listxattrs(status, None),
+        NfsArgop4::Removexattr(_) => NfsResop4::Removexattr(status, None),
+        NfsArgop4::Unsupported(opnum) => NfsResop4::Unsupported(*opnum, status),
         NfsArgop4::Illegal => NfsResop4::Illegal(status),
     }
 }
@@ -597,6 +617,11 @@ fn argop_name(op: &NfsArgop4) -> &'static str {
         NfsArgop4::GetDeviceInfo => "GETDEVICEINFO",
         NfsArgop4::GetDeviceList => "GETDEVICELIST",
         NfsArgop4::SetSsv => "SET_SSV",
+        NfsArgop4::Getxattr(_) => "GETXATTR",
+        NfsArgop4::Setxattr(_) => "SETXATTR",
+        NfsArgop4::Listxattrs(_) => "LISTXATTRS",
+        NfsArgop4::Removexattr(_) => "REMOVEXATTR",
+        NfsArgop4::Unsupported(_) => "UNSUPPORTED",
         NfsArgop4::Illegal => "ILLEGAL",
     }
 }
@@ -655,6 +680,11 @@ fn res_status(res: &NfsResop4) -> NfsStat4 {
         NfsResop4::GetDeviceInfo(s, _) => *s,
         NfsResop4::GetDeviceList(s, _) => *s,
         NfsResop4::SetSsv(s, _) => *s,
+        NfsResop4::Getxattr(s, _) => *s,
+        NfsResop4::Setxattr(s, _) => *s,
+        NfsResop4::Listxattrs(s, _) => *s,
+        NfsResop4::Removexattr(s, _) => *s,
+        NfsResop4::Unsupported(_, s) => *s,
         NfsResop4::Illegal(s) => *s,
     }
 }
@@ -713,6 +743,11 @@ fn resop_name(res: &NfsResop4) -> &'static str {
         NfsResop4::GetDeviceInfo(_, _) => "GETDEVICEINFO",
         NfsResop4::GetDeviceList(_, _) => "GETDEVICELIST",
         NfsResop4::SetSsv(_, _) => "SET_SSV",
+        NfsResop4::Getxattr(_, _) => "GETXATTR",
+        NfsResop4::Setxattr(_, _) => "SETXATTR",
+        NfsResop4::Listxattrs(_, _) => "LISTXATTRS",
+        NfsResop4::Removexattr(_, _) => "REMOVEXATTR",
+        NfsResop4::Unsupported(_, _) => "UNSUPPORTED",
         NfsResop4::Illegal(_) => "ILLEGAL",
     }
 }

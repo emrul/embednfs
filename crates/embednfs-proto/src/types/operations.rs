@@ -512,6 +512,43 @@ pub struct SetSsvResOk4 {
     pub digest: bytes::Bytes,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetxattrOption4 {
+    Either,
+    Create,
+    Replace,
+}
+
+#[derive(Debug)]
+pub struct GetxattrArgs4 {
+    pub name: String,
+}
+
+#[derive(Debug)]
+pub struct SetxattrArgs4 {
+    pub option: SetxattrOption4,
+    pub key: String,
+    pub value: bytes::Bytes,
+}
+
+#[derive(Debug)]
+pub struct ListxattrsArgs4 {
+    pub cookie: u64,
+    pub maxcount: u32,
+}
+
+#[derive(Debug)]
+pub struct ListxattrsResOk4 {
+    pub cookie: u64,
+    pub names: Vec<String>,
+    pub eof: bool,
+}
+
+#[derive(Debug)]
+pub struct RemovexattrArgs4 {
+    pub name: String,
+}
+
 /// NfsArgop4 - a single operation in a COMPOUND request.
 #[derive(Debug)]
 pub enum NfsArgop4 {
@@ -567,6 +604,11 @@ pub enum NfsArgop4 {
     GetDeviceInfo,
     GetDeviceList,
     SetSsv,
+    Getxattr(GetxattrArgs4),
+    Setxattr(SetxattrArgs4),
+    Listxattrs(ListxattrsArgs4),
+    Removexattr(RemovexattrArgs4),
+    Unsupported(u32),
     Illegal,
 }
 
@@ -696,5 +738,10 @@ pub enum NfsResop4 {
     GetDeviceInfo(NfsStat4, Option<GetDeviceInfoRes4>),
     GetDeviceList(NfsStat4, Option<GetDeviceListResOk4>),
     SetSsv(NfsStat4, Option<SetSsvResOk4>),
+    Getxattr(NfsStat4, Option<bytes::Bytes>),
+    Setxattr(NfsStat4, Option<ChangeInfo4>),
+    Listxattrs(NfsStat4, Option<ListxattrsResOk4>),
+    Removexattr(NfsStat4, Option<ChangeInfo4>),
+    Unsupported(u32, NfsStat4),
     Illegal(NfsStat4),
 }

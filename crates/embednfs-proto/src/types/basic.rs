@@ -138,6 +138,8 @@ pub enum NfsStat4 {
     RejectDeleg = 10085,
     ReturnConflict = 10086,
     DelegRevoked = 10087,
+    NoXattr = 10095,
+    Xattr2Big = 10096,
 }
 
 impl NfsStat4 {
@@ -246,6 +248,8 @@ impl NfsStat4 {
             10085 => NfsStat4::RejectDeleg,
             10086 => NfsStat4::ReturnConflict,
             10087 => NfsStat4::DelegRevoked,
+            10095 => NfsStat4::NoXattr,
+            10096 => NfsStat4::Xattr2Big,
             _ => return None,
         })
     }

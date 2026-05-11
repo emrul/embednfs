@@ -481,6 +481,37 @@ pub fn encode_access(access_bits: u32) -> Vec<u8> {
     buf.to_vec()
 }
 
+pub fn encode_getxattr(name: &str) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_GETXATTR.encode(&mut buf);
+    name.to_string().encode(&mut buf);
+    buf.to_vec()
+}
+
+pub fn encode_setxattr(option: u32, name: &str, value: &[u8]) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_SETXATTR.encode(&mut buf);
+    option.encode(&mut buf);
+    name.to_string().encode(&mut buf);
+    encode_opaque(&mut buf, value);
+    buf.to_vec()
+}
+
+pub fn encode_listxattrs(cookie: u64, maxcount: u32) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_LISTXATTRS.encode(&mut buf);
+    cookie.encode(&mut buf);
+    maxcount.encode(&mut buf);
+    buf.to_vec()
+}
+
+pub fn encode_removexattr(name: &str) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_REMOVEXATTR.encode(&mut buf);
+    name.to_string().encode(&mut buf);
+    buf.to_vec()
+}
+
 pub fn encode_commit(offset: u64, count: u32) -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_COMMIT.encode(&mut buf);

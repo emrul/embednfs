@@ -74,6 +74,7 @@ pub(crate) fn supported_attrs_bitmap(capabilities: &FsCapabilities) -> Bitmap4 {
     }
     if capabilities.xattrs {
         supported.set(FATTR4_NAMED_ATTR);
+        supported.set(FATTR4_XATTR_SUPPORT);
     }
     supported
 }
@@ -430,6 +431,12 @@ pub(crate) fn encode_fattr4(
         excl.set(FATTR4_SIZE);
         excl.set(FATTR4_MODE);
         excl.encode(&mut vals);
+    }
+
+    // FATTR4_XATTR_SUPPORT (82)
+    if request.is_set(FATTR4_XATTR_SUPPORT) {
+        result_bitmap.set(FATTR4_XATTR_SUPPORT);
+        ctx.capabilities.xattrs.encode(&mut vals);
     }
 
     Fattr4 {

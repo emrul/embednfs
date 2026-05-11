@@ -151,7 +151,7 @@ impl<F: FileSystem> NfsServer<F> {
                     Ok(args) => {
                         let request_ctx = Self::request_context(&call.cred);
                         let mut replay_token = None;
-                        let prepared_sequence = if args.minorversion == 1 {
+                        let prepared_sequence = if matches!(args.minorversion, 1 | 2) {
                             match args.argarray.first() {
                                 Some(NfsArgop4::Sequence(seq_args)) => {
                                     let fingerprint =
