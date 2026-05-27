@@ -132,37 +132,54 @@ To clean up: `git -C /Users/emrul/dev/github/emrul/embednfs worktree remove /tmp
 
 ## Hypotheses, in order of "cheap to test, likely to be the answer"
 
-1. **`mount_nfs` is doing an rpcbind/portmap probe on UDP/111 even with
-   `port=` set.** Failure of that probe is what produces "Invalid
-   argument" before any NFSv4 traffic is attempted. Apple's NFS client
-   source (see "Sources") documents portmap dependencies for legacy
-   versions; the v4 path is supposed to skip rpcbind when `port=` is
-   given, but the current `mount_nfs` may still issue an exploratory
-   UDP/111 NULL.
+Hypotheses 2 and 4 have been **eliminated** by live testing (see
+"Eliminated hypotheses" below).
 
-2. **Privileged source port enforcement.** The kernel may require the
-   NFS data socket to bind to a `< 1024` source port, ignoring
-   `resvport=off` for the loopback NFS case. If `mount_nfs` cannot
-   acquire a reserved port (because it is not setuid root, or because of
-   sandboxing in the user's session), it might abort with "Invalid
-   argument". Worth testing under `sudo`.
+1. **Kernel-side mount-syscall argument validation is rejecting the
+   request before any I/O.** This is now the leading suspect: with
+   `sudo`, `resvport`, `vers=4`, and `nolocks` all in play, `mount_nfs`
+   returns `EINVAL` **synchronously** — no hang, no retry, no socket
+   activity beyond the initial TCP `connect()`. The two transient TCP
+   sessions in the server log are likely a `connect()` probe inside
+   `mount_nfs` that closes immediately when something subsequent fails.
+   The failure has to live in the kernel's `mount(2)` / NFS-specific
+   syscall validating the args struct (e.g., bad `nfs_args_v4`,
+   missing `fhsize`, wrong `mntfrom` shape), or in `NetFS` between
+   `mount_nfs` and the syscall.
 
-3. **`mount_nfs` expects a server-initiated "NULL RPC" or some banner.**
-   Unlikely (RPC has no banner), but the precise wire trace would
-   confirm.
+2. **`mount_nfs` is doing an rpcbind/portmap probe on UDP/111 even with
+   `port=` set.** Less likely now that we have the synchronous-EINVAL
+   evidence (a portmap timeout would be slow), but a packet capture
+   would settle it definitively.
 
-4. **kext or NetFS pathing.** macOS routes NFS mounts through `NetFS`
-   user-space helpers. If something there refuses an
-   unprivileged-localhost mount on policy grounds, the error would
-   surface as "Invalid argument" with no on-wire RPC.
+3. **`mount_nfs` expects something the server has to offer before
+   issuing the first RPC (NULL probe response, TCP keep-alive, etc.).**
+   Unlikely — there is no defined banner — but worth a look in the
+   Apple source.
 
-5. **`vers=4.1` was never actually validated on a recent macOS.** The
-   embednfs README's "Use vers=4.1 explicitly" note implies it once
-   worked, but the man page on macOS 15.5 explicitly caps the kernel
-   client at minor version 0. If older Macs ever accepted vers=4.1,
-   that path may have been removed in a recent macOS release. The
-   smoke script that uses it has likely been silently failing for some
-   time.
+### Eliminated hypotheses
+
+- **~~Privileged source port enforcement.~~** Tested with `sudo` plus
+  explicit `resvport`. `mount_nfs -v` confirmed the kernel was using
+  `resvport` (the verbose `NFS options:` line listed it). Same
+  synchronous `EINVAL`. Privileged-port hypothesis is dead.
+
+- **~~kext / NetFS user-level policy.~~** Running under `sudo` would
+  bypass any user-level sandboxing or policy refusal. The behavior was
+  identical to the unprivileged run. NetFS as a *userland* policy gate
+  is not the cause; the *kernel-side* NetFS path remains possible (see
+  hypothesis 1).
+
+- **~~Server-side incompatibility with macOS clients.~~** Confirmed
+  identical failure on upstream `feat/linux-v42-xattrs` via the
+  `git worktree` A/B in the next section. Nothing on this branch
+  regresses macOS interop; both states are equally broken.
+
+- **macOS once accepted `vers=4.1`.** Recorded as a separate finding:
+  the embednfs README's "Use vers=4.1 explicitly" no longer applies.
+  macOS 15.5 `mount_nfs(8)` silently drops `vers=4.1` and falls back to
+  v3. The branch's `docs:` commit already updates the README and quick-
+  start.
 
 ## Suggested next steps
 
