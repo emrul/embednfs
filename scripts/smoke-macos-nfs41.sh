@@ -11,7 +11,7 @@ fi
 MOUNT_DIR="$(cd "${MOUNT_DIR}" && pwd -P)"
 LOG_FILE="${LOG_FILE:-/tmp/embednfs-smoke-server.log}"
 SERVER_CMD="${SERVER_CMD:-cargo run -p embednfsd --release}"
-MOUNT_OPTS="${MOUNT_OPTS:-vers=4.1,tcp,port=2049,nobrowse}"
+MOUNT_OPTS="${MOUNT_OPTS:-vers=4,tcp,port=2049,nobrowse}"
 SERVER_PID=""
 MOUNT_ACTIVE=0
 
@@ -110,4 +110,4 @@ log "Removing test files"
 rm "${RENAMED_FILE}"
 rmdir "${SMOKE_DIR}"
 
-log "smoke ok: create/write/read/rename/remove/rmdir over mounted NFSv4.1"
+log "smoke ok: create/write/read/rename/remove/rmdir over mounted NFSv4.0"

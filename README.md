@@ -224,7 +224,7 @@ The integration suite exercises the full RPC path over TCP and includes raw `OPE
 
 The ignored `nfs4j` smoke and stress tests use the pinned harness from `https://github.com/PeronGH/nfs4j.git` at commit `9d433b98bf56ea6d5cf791388c9d75ad32d5d0f2`. `scripts/ensure-nfs4j-client.sh` clones or reuses `/tmp/nfs4j`, checks out that exact ref, builds `basic-client`, and prints the resulting `jar-with-dependencies` path.
 
-For a genuine localhost/macOS smoke test, `scripts/smoke-macos-nfs41.sh` starts `embednfsd`, mounts it with `mount_nfs`, exercises basic create/write/read/rename/remove/rmdir behavior through the kernel client.
+For a genuine localhost/macOS smoke test, `scripts/smoke-macos-nfs41.sh` starts `embednfsd`, mounts it with `mount_nfs` using NFSv4.0, and exercises basic create/write/read/rename/remove/rmdir behavior through the kernel client.
 
 Many of the protocol conformance tests are adapted from the maintained `pynfs` tree at `git://git.linux-nfs.org/projects/cdmackay/pynfs.git`.
 

@@ -5,15 +5,24 @@ not a claim of validated macOS support.
 
 ## TL;DR
 
-On **macOS 15.5 (Darwin 24.5.0)** the kernel `mount_nfs(8)` tool **cannot
-mount any embednfs-served export over loopback**, with or without the
-`feat/restore-v40-mac-client` work. Two distinct failure modes were
-observed; both happen *before* embednfs sees a single RPC byte.
+On **macOS 15.5 (Darwin 24.5.0)** the kernel `mount_nfs(8)` tool can mount
+an embednfs-served export over loopback when the command line is:
 
-The NFSv4.0 wire path inside embednfs works (proven by integration tests
-that bypass `mount_nfs` and speak v4.0 directly over the TCP socket). The
-remaining gap is between `mount_nfs` and the kernel NFS client — not in
-embednfs itself.
+```bash
+mount_nfs -o vers=4,tcp,port=2049,nobrowse 127.0.0.1:/ /tmp/embednfs
+```
+
+The previous failing `vers=4,tcp,port=2049,nolocks,nobrowse` command was
+rejected by the Apple kernel before network I/O because `nolocks` is not
+allowed for NFSv4 mounts. Apple `mount_nfs -vvv` prints `locks` for the
+working command and the server then sees the expected v4.0 SETCLIENTID
+handshake and mount COMPOUNDs.
+
+The NFSv4.0 mount path inside embednfs works end-to-end: mount,
+directory listing, `mkdir`, `echo hello > file.txt`, `cat file.txt`,
+and `ls` all round-trip through the kernel client with no
+`NFS4ERR_BAD_STATEID` in the server log. See "Write path — resolved"
+below for the two bugs that previously caused the WRITE retry loop.
 
 ## Branch context
 
@@ -77,7 +86,7 @@ fall back to v2"), and the NFSv3 path then complains about `rpc.statd`
 not running. `nolocks` suppresses the `rpc.statd` requirement but does
 not change the underlying "fell back to v3" problem.
 
-### B) `vers=4` — TCP connects, no RPC ever flows, `Invalid argument`
+### B) `vers=4` plus `nolocks` — rejected before RPC
 
 ```
 $ mount_nfs -v -o vers=4,tcp,port=2049,nolocks,nobrowse 127.0.0.1:/ /tmp/up-mnt
@@ -92,70 +101,48 @@ file system locations:
 NFS options: fg,retrycnt=1,vers=4,nolocks
 ```
 
-Server-side trace logging (`RUST_LOG=embednfs=trace`) confirms:
+Apple's kernel source rejects disabled/local lock mode for NFSv4. In
+`kext/nfs_vfsops.c`, lock modes `NFS_LOCK_MODE_DISABLED` and
+`NFS_LOCK_MODE_LOCAL` return `EINVAL` when `nmp->nm_vers >= NFS_VER4`; the
+post-connect mount setup also rejects any v4 mount whose lock mode is not
+`NFS_LOCK_MODE_ENABLED`. This exactly matches the synchronous `Invalid
+argument` before any RPC bytes reach embednfs.
 
-```
-INFO  embednfsd: serving /private/tmp/embednfs-root on 0.0.0.0:2049
-INFO  embednfs::server: NFSv4.1 server listening on 0.0.0.0:2049
-DEBUG embednfs::server: New connection from 127.0.0.1:57275
-DEBUG embednfs::server: New connection from 127.0.0.1:57276
-```
+Removing `nolocks` changes the verbose output to `locks` and allows the mount
+to proceed.
 
-Two TCP connections accepted; **zero** `trace!("RPC request bytes=…")`
-lines (that trace is at `crates/embednfs/src/server/transport.rs:113` —
-it fires on any decoded RPC envelope). `mount_nfs` is opening sockets
-and closing them without ever sending NFS traffic.
+### A vs B
 
-### A vs B: same root cause likely
-
-In (A) `mount_nfs` is in v3 fallback; in (B) it is committed to v4. Both
-fail before sending NFSv4 protocol, just with different error strings.
-The "`Invalid argument`" form is the one to chase — it is the v4 path
-giving up at a TCP-level / pre-RPC step.
+In (A), `mount_nfs` is in v3 fallback because macOS rejects `vers=4.1`. In
+(B), `mount_nfs` is in v4 but the `nolocks` option is invalid for v4. These
+are two separate command-line problems, not a server transport problem.
 
 ## Has-our-branch-regressed check
 
-Run from `/Users/emrul/dev/emrul/portal-sync` (or wherever):
+The earlier A/B used the invalid `nolocks` command line, so it only proved
+that both branches were equally rejected by the Apple kernel before network
+I/O. It did not prove a server incompatibility.
+
+With the corrected command, the current branch mounts and emits normal
+NFSv4.0 traffic:
 
 ```bash
-git -C /Users/emrul/dev/github/emrul/embednfs worktree add /tmp/embednfs-upstream feat/linux-v42-xattrs
-cd /tmp/embednfs-upstream && cargo build --release -p embednfsd
-RUST_LOG=embednfs=trace ./target/release/embednfsd &
-mount_nfs -v -o vers=4,tcp,port=2049,nolocks,nobrowse 127.0.0.1:/ /tmp/up-mnt
+mount_nfs -vvv -o vers=4,tcp,port=2049,nobrowse 127.0.0.1:/ /tmp/embednfs
 ```
 
-Result on macOS 15.5: identical "Invalid argument" plus zero RPC bytes
-on the server side. The failure is pre-existing — both branches behave
-the same way.
+Observed server sequence:
 
-To clean up: `git -C /Users/emrul/dev/github/emrul/embednfs worktree remove /tmp/embednfs-upstream`.
+- RPC NULL
+- `SETCLIENTID`
+- `SETCLIENTID_CONFIRM`
+- `PUTROOTFH + GETATTR`
+- `PUTFH + GETATTR`
+- repeated `STATFS`, `LOOKUP`, and `ACCESS` traffic from Finder/kernel probes
 
-## Hypotheses, in order of "cheap to test, likely to be the answer"
+Directory creation over the mounted filesystem succeeded. File writing exposed
+the separate `WRITE`/stateid issue described below.
 
-Hypotheses 2 and 4 have been **eliminated** by live testing (see
-"Eliminated hypotheses" below).
-
-1. **Kernel-side mount-syscall argument validation is rejecting the
-   request before any I/O.** This is now the leading suspect: with
-   `sudo`, `resvport`, `vers=4`, and `nolocks` all in play, `mount_nfs`
-   returns `EINVAL` **synchronously** — no hang, no retry, no socket
-   activity beyond the initial TCP `connect()`. The two transient TCP
-   sessions in the server log are likely a `connect()` probe inside
-   `mount_nfs` that closes immediately when something subsequent fails.
-   The failure has to live in the kernel's `mount(2)` / NFS-specific
-   syscall validating the args struct (e.g., bad `nfs_args_v4`,
-   missing `fhsize`, wrong `mntfrom` shape), or in `NetFS` between
-   `mount_nfs` and the syscall.
-
-2. **`mount_nfs` is doing an rpcbind/portmap probe on UDP/111 even with
-   `port=` set.** Less likely now that we have the synchronous-EINVAL
-   evidence (a portmap timeout would be slow), but a packet capture
-   would settle it definitively.
-
-3. **`mount_nfs` expects something the server has to offer before
-   issuing the first RPC (NULL probe response, TCP keep-alive, etc.).**
-   Unlikely — there is no defined banner — but worth a look in the
-   Apple source.
+## Findings
 
 ### Eliminated hypotheses
 
@@ -167,13 +154,10 @@ Hypotheses 2 and 4 have been **eliminated** by live testing (see
 - **~~kext / NetFS user-level policy.~~** Running under `sudo` would
   bypass any user-level sandboxing or policy refusal. The behavior was
   identical to the unprivileged run. NetFS as a *userland* policy gate
-  is not the cause; the *kernel-side* NetFS path remains possible (see
-  hypothesis 1).
+  is not the cause.
 
-- **~~Server-side incompatibility with macOS clients.~~** Confirmed
-  identical failure on upstream `feat/linux-v42-xattrs` via the
-  `git worktree` A/B in the next section. Nothing on this branch
-  regresses macOS interop; both states are equally broken.
+- **~~Server-side incompatibility with macOS mount negotiation.~~** The
+  corrected command reaches embednfs and completes the v4.0 mount handshake.
 
 - **macOS once accepted `vers=4.1`.** Recorded as a separate finding:
   the embednfs README's "Use vers=4.1 explicitly" no longer applies.
@@ -181,103 +165,70 @@ Hypotheses 2 and 4 have been **eliminated** by live testing (see
   v3. The branch's `docs:` commit already updates the README and quick-
   start.
 
-## Suggested next steps
+- **`nolocks` is invalid for NFSv4 on macOS.** This is the direct cause of
+  the `vers=4` / `Invalid argument` failure. NFSv4 locking is integrated into
+  the protocol state model, so the Apple client requires enabled locks for v4
+  mounts.
 
-### Step 1 — `dtruss` the failing syscall (10 min, settles hypothesis 1)
-
-The synchronous `EINVAL` says the kernel rejects the request before any
-RPC. `dtruss` will tell us exactly which syscall and what arg shape.
-
-```bash
-# Terminal A
-RUST_LOG=embednfs=trace ./target/release/embednfsd
-# Terminal B
-sudo dtruss -f mount_nfs -v -o vers=4,tcp,port=2049,nolocks,nobrowse \
-    127.0.0.1:/ /tmp/test 2>&1 \
-  | grep -E 'mount|nfs|connect|EINVAL|= -1' \
-  | tee /tmp/dtruss.log
-```
-
-If SIP blocks `dtruss` against `mount_nfs` (likely on standard 15.5):
-
-```bash
-sudo csrutil status   # check SIP state
-# Workaround: copy mount_nfs to a writable path so dtruss can attach.
-cp /sbin/mount_nfs /tmp/mount_nfs.local
-sudo chmod +x /tmp/mount_nfs.local
-sudo dtruss -f /tmp/mount_nfs.local -v -o vers=4,tcp,port=2049,nolocks,nobrowse \
-    127.0.0.1:/ /tmp/test 2>&1 | grep -E 'mount|EINVAL|= -1' | tee /tmp/dtruss.log
-```
-
-What to look for:
-
-- The line containing `mount(...) = -1 Err#22 EINVAL`. The `mount(2)`
-  syscall on macOS NFSv4 takes a `data` argument that points at a
-  serialized `nfs_args` / `nfs_args_v8` blob. The error indicates which
-  field tripped the validator.
-- `connect()` to 127.0.0.1:2049 returning before the failing `mount()`
-  would explain the two transient TCP sessions in the server log.
-
-### Step 2 — Packet capture (5 min, settles hypothesis 2)
-
-Cheap secondary signal. Confirms there is no UDP/111 traffic
-(eliminates the rpcbind theory) and shows the connect/RST timing.
-
-```bash
-sudo tcpdump -i lo0 -nn -X 'port 2049 or port 111' -w /tmp/macos-mount.pcap &
-sudo mount_nfs -v -o vers=4,tcp,port=2049,nolocks,nobrowse \
-    127.0.0.1:/tree-a /tmp/test
-sudo killall tcpdump
-sudo tcpdump -r /tmp/macos-mount.pcap -nn -A | head -200
-```
-
-Expected: TCP SYN → SYN/ACK → ACK → FIN/RST, with no RPC record markers
-(four-byte `80 00 00 xx`) ever sent. Confirms the kernel is bailing
-pre-RPC and the failure is in syscall-arg validation, not on the wire.
-
-### Step 3 — Apple's NFS client source
+## Apple Source Notes
 
 `mount_nfs` and the kernel-side NFS code are open source:
 
 <https://github.com/apple-oss-distributions/NFS>
 
-Start at `mount_nfs/mount_nfs.c` — find the call site for the
-`mount(2)` syscall (it builds an `nfs_args_v8` / `nfs_mount_args` blob
-and passes it as the `data` argument). Then cross-reference with
-`NFS/nfs_vfsops.c` in the kernel-side tree, scanning for the `EINVAL`
-returns in `nfs_vfs_mount` / `nfs_mount_args_check` (names may differ
-by version).
+Relevant source path:
 
-Specific things known to trip macOS NFSv4 mounts:
+- `mount_nfs/mount_nfs.c`: parses `nolocks` into `NFS_LOCK_MODE_DISABLED` and
+  passes XDR mount args to `mount("nfs", ...)`.
+- `kext/nfs_vfsops.c`: rejects disabled/local lock mode for NFSv4 with
+  `EINVAL`.
 
-- Missing or empty `path` field (the `127.0.0.1:/tree-a` parsing).
-- Server "address" embedded in the args blob in an unexpected `struct
-  sockaddr` form.
-- An expected `mountport=` value when `nfsproto=` is TCP-only.
+## Write path — resolved
 
-### Step 4 — If steps 1–3 still leave it open
+The earlier `WRITE → NFS4ERR_BAD_STATEID → OPEN(claim=PREVIOUS)` retry
+loop was two bugs in the new v4.0 path, both fixed in
+`fix(server): NFSv4.0 OPEN_CONFIRM + I/O stateid path`:
 
-- Try `mount_nfs -o public 127.0.0.1:/ /tmp/test` — the NFSv4 public
-  filehandle path may sidestep whatever validation is failing.
-- Try `mount_nfs -o vers=4,mountport=2049,nfsproto=tcp,...` — some
-  legacy macOS paths require an explicit `mountport=`.
-- Try `mount_nfs -o vers=4,negnamecache=off,namedattr,...` — strip
-  every advisory option to a minimum and add back one at a time.
+1. **OPEN_CONFIRM never updated server-side `stateid_seq`.** The handler
+   was bumping only the response, so the next WRITE arrived with
+   `seqid = 2` while `open_files[other].stateid_seq` was still `1`, and
+   `validate_stateid_seq` rejected it. The fix adds
+   `StateManager::confirm_open_state` which validates the client's
+   stateid, bumps the stored seqid, and returns the new one (RFC 7530
+   §16.18).
 
-### Step 5 — Validation harness
+2. **`resolve_io_stateid` demanded a `sequence_clientid`.** WRITE, READ,
+   CLOSE, and OPEN_DOWNGRADE all extracted a `Clientid4` from the
+   COMPOUND's SEQUENCE op and rejected with `NFS4ERR_BAD_STATEID` if it
+   was missing. v4.0 has no SEQUENCE, so every IO op tripped that gate
+   before the stateid was even looked up. `resolve_stateid` now accepts
+   `Option<Clientid4>`: `Some` keeps the RFC 8881 §15.1.16.4 owner
+   check for v4.1; `None` (v4.0) skips it and trusts the stateid lookup
+   itself.
 
-Once a mount succeeds, fold the working command line back into
-`scripts/smoke-macos-nfs41.sh` (rename to `scripts/smoke-macos-nfs40.sh`
-since macOS is on v4.0) so this regression is caught next time. The
-existing script's `vers=4.1` should be replaced with whatever Step 1–4
-proves to work.
+Live verification on macOS 15.5: `mount_nfs -o vers=4,tcp,port=2049,nobrowse`
+mounts unprivileged, `echo hello > foo.txt && cat foo.txt && ls` all
+succeed through the kernel client, and the server log shows zero
+`BadStateid` results across the full round-trip.
+
+## Validation Harness
+
+The default macOS smoke options should be:
+
+```bash
+MOUNT_OPTS="vers=4,tcp,port=2049,nobrowse"
+```
+
+Do not add `nolocks` to macOS NFSv4 smoke commands. With the write
+fix in place, `scripts/smoke-macos-nfs41.sh` should run end-to-end
+without hanging.
 
 ## Definition of done
 
 A clean `mount_nfs … 127.0.0.1:/ /tmp/embednfs` against `embednfsd` on
-the current macOS, with `ls`, `cat`, `mkdir`, and a small write all
-succeeding through the kernel client. The smoke script in `scripts/`
-should reproduce it.
+the current macOS, with `ls`, `mkdir`, `cat`, and a small write all succeeding
+through the kernel client. The smoke script in `scripts/` should reproduce it
+without hanging.
 
 The integration tests in `crates/embednfs/tests/compound_session_cases/`
 already cover the on-the-wire correctness for v4.0; the goal of this
