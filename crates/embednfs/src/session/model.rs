@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use embednfs_proto::{
     ClientOwner4, Clientid4, NfsLockType4, SequenceRes4, Sequenceid4, Sessionid4, Slotid4,
-    StateOwner4,
+    StateOwner4, Verifier4,
 };
 
 use crate::internal::ServerObject;
@@ -90,6 +90,10 @@ pub(super) struct ClientState {
     pub sequence_id: Sequenceid4,
     pub replaced_clientid: Option<Clientid4>,
     pub lease_state: ClientLeaseState,
+    /// Server-issued confirmation verifier awaiting a matching
+    /// `SETCLIENTID_CONFIRM`. `None` once confirmed or for v4.1
+    /// (EXCHANGE_ID) clients, which use the session-level confirm path.
+    pub v40_confirm: Option<Verifier4>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

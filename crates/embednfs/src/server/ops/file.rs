@@ -220,6 +220,7 @@ impl<F: FileSystem> NfsServer<F> {
         request_ctx: &RequestContext,
         args: &OpenArgs4,
         current_fh: &mut Option<NfsFh4>,
+        minorversion: u32,
     ) -> NfsResop4 {
         let (_, container) = match self.resolve_object(current_fh).await {
             Ok(resolved) => resolved,
@@ -426,12 +427,20 @@ impl<F: FileSystem> NfsServer<F> {
             }
         };
 
+        // NFSv4.0 clients require OPEN_CONFIRM after an initial OPEN; tell
+        // them to do that by setting OPEN4_RESULT_CONFIRM. NFSv4.1+ clients
+        // never see this bit because sessions subsume the confirm step.
+        let mut rflags = OPEN4_RESULT_LOCKTYPE_POSIX;
+        if minorversion == 0 {
+            rflags |= OPEN4_RESULT_CONFIRM;
+        }
+
         NfsResop4::Open(
             NfsStat4::Ok,
             Some(OpenRes4 {
                 stateid,
                 cinfo,
-                rflags: OPEN4_RESULT_LOCKTYPE_POSIX,
+                rflags,
                 attrset: Bitmap4::new(),
                 delegation: OpenDelegation4::None,
             }),

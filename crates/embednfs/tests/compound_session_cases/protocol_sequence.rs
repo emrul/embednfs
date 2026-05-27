@@ -19,25 +19,45 @@ async fn test_null_procedure() {
 // ===== COMPOUND basics =====
 
 /// COMPOUND with unsupported minor versions must return NFS4ERR_MINOR_VERS_MISMATCH.
+/// minor versions 0, 1, and 2 are supported (NFSv4.0, NFSv4.1, NFSv4.2);
+/// any higher minor version still has to be rejected.
 /// Origin: `pynfs/nfs4.1/server41tests/st_compound.py` (CODE `COMP4a`, `COMP4b`).
 /// RFC: RFC 8881 §2.10.6.4.
 #[tokio::test]
 async fn test_minor_version_mismatch_rejects_unsupported_minor_versions() {
     let port = start_server().await;
     let mut stream = connect(port).await;
-    let rootfh_op = encode_putrootfh();
     let illegal_op = encode_illegal();
 
-    for (xid, minorversion, op) in [(1, 0u32, &rootfh_op[..]), (2, 3u32, &illegal_op[..])] {
-        let compound = encode_compound_minor("bad-minor", minorversion, &[op]);
-        let mut resp = send_rpc(&mut stream, xid, 1, &compound).await;
-        let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);
-        assert_eq!(accept_stat, 0);
+    let compound = encode_compound_minor("bad-minor", 3, &[&illegal_op[..]]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);
+    assert_eq!(accept_stat, 0);
 
-        let (status, _, num_results) = parse_compound_header(&mut resp);
-        assert_eq!(status, NfsStat4::MinorVersMismatch as u32);
-        assert_eq!(num_results, 0);
-    }
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::MinorVersMismatch as u32);
+    assert_eq!(num_results, 0);
+}
+
+/// COMPOUND at minorversion=0 (NFSv4.0) must be accepted and operations
+/// that do not require sessions (PUTROOTFH here) must run normally.
+/// Origin: portal-sync §13 phase-0 mac-client compatibility probe.
+/// RFC: RFC 7530 §16.
+#[tokio::test]
+async fn test_minorversion_zero_accepts_putrootfh() {
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+    let rootfh_op = encode_putrootfh();
+
+    let compound = encode_compound_minor("v40-mount", 0, &[&rootfh_op[..]]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);
+    assert_eq!(accept_stat, 0);
+
+    let (status, tag, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(tag, "v40-mount");
+    assert_eq!(num_results, 1);
 }
 
 /// Empty COMPOUND with minorversion=1 and zero ops must succeed.

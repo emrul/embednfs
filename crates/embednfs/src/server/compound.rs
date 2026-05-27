@@ -13,6 +13,8 @@ struct CompoundExecutionState {
     current_stateid: Option<Stateid4>,
     saved_fh: Option<NfsFh4>,
     saved_stateid: Option<Stateid4>,
+    /// COMPOUND minor version (0 = NFSv4.0, 1 = NFSv4.1, 2 = NFSv4.2).
+    minorversion: u32,
 }
 
 impl<F: FileSystem> NfsServer<F> {
@@ -32,7 +34,7 @@ impl<F: FileSystem> NfsServer<F> {
             op_names
         );
 
-        if !matches!(args.minorversion, 1 | 2) {
+        if !matches!(args.minorversion, 0..=2) {
             return Compound4Res {
                 status: NfsStat4::MinorVersMismatch,
                 tag: args.tag,
@@ -52,7 +54,10 @@ impl<F: FileSystem> NfsServer<F> {
             None => None,
         };
 
-        if let Some(first_op) = first_op
+        // NFSv4.0 has no SEQUENCE op; the v4.1 first-op gating only applies
+        // to minor versions that carry session state.
+        if args.minorversion != 0
+            && let Some(first_op) = first_op
             && !starts_with_sequence
         {
             if allows_compound_without_sequence(first_op) {
@@ -79,7 +84,10 @@ impl<F: FileSystem> NfsServer<F> {
             }
         }
 
-        let mut compound_state = CompoundExecutionState::default();
+        let mut compound_state = CompoundExecutionState {
+            minorversion: args.minorversion,
+            ..Default::default()
+        };
         let mut resarray = Vec::with_capacity(total_ops);
         let mut overall_status = NfsStat4::Ok;
 
@@ -209,7 +217,8 @@ impl<F: FileSystem> NfsServer<F> {
                 {
                     return NfsResop4::Open(status, None);
                 }
-                self.op_open(request_ctx, args, &mut state.current_fh).await
+                self.op_open(request_ctx, args, &mut state.current_fh, state.minorversion)
+                    .await
             }
             NfsArgop4::Putfh(args) => {
                 if !Self::fh_has_valid_format(&args.object) {
@@ -351,11 +360,56 @@ impl<F: FileSystem> NfsServer<F> {
                 NfsResop4::TestStateid(NfsStat4::Ok, results)
             }
             NfsArgop4::DelegReturn(_) => NfsResop4::DelegReturn(NfsStat4::Ok),
-            NfsArgop4::OpenConfirm(_) => NfsResop4::OpenConfirm(NfsStat4::Notsupp, None),
-            NfsArgop4::Renew(_) => NfsResop4::Renew(NfsStat4::Notsupp),
-            NfsArgop4::SetClientId(_) => NfsResop4::SetClientId(NfsStat4::Notsupp, None),
-            NfsArgop4::SetClientIdConfirm(_) => NfsResop4::SetClientIdConfirm(NfsStat4::Notsupp),
-            NfsArgop4::ReleaseLockowner(_) => NfsResop4::ReleaseLockowner(NfsStat4::Notsupp),
+            NfsArgop4::OpenConfirm(args) => {
+                if state.minorversion != 0 {
+                    NfsResop4::OpenConfirm(NfsStat4::Notsupp, None)
+                } else {
+                    // RFC 7530 §16.18: bump the open stateid seqid and echo
+                    // it back. Lockowner sequence state is tracked elsewhere;
+                    // for the minimal v4.0 path we treat OPEN_CONFIRM as a
+                    // stateid bump so the client can proceed.
+                    let mut stateid = args.open_stateid;
+                    stateid.seqid = stateid.seqid.wrapping_add(1);
+                    NfsResop4::OpenConfirm(NfsStat4::Ok, Some(stateid))
+                }
+            }
+            NfsArgop4::Renew(clientid) => {
+                if state.minorversion != 0 {
+                    NfsResop4::Renew(NfsStat4::Notsupp)
+                } else {
+                    match self.state.renew(*clientid).await {
+                        Ok(()) => NfsResop4::Renew(NfsStat4::Ok),
+                        Err(status) => NfsResop4::Renew(status),
+                    }
+                }
+            }
+            NfsArgop4::SetClientId(args) => {
+                if state.minorversion != 0 {
+                    NfsResop4::SetClientId(NfsStat4::Notsupp, None)
+                } else {
+                    let res = self.state.set_client_id(args).await;
+                    NfsResop4::SetClientId(NfsStat4::Ok, Some(res))
+                }
+            }
+            NfsArgop4::SetClientIdConfirm(args) => {
+                if state.minorversion != 0 {
+                    NfsResop4::SetClientIdConfirm(NfsStat4::Notsupp)
+                } else {
+                    match self.state.set_client_id_confirm(args).await {
+                        Ok(()) => NfsResop4::SetClientIdConfirm(NfsStat4::Ok),
+                        Err(status) => NfsResop4::SetClientIdConfirm(status),
+                    }
+                }
+            }
+            NfsArgop4::ReleaseLockowner(_) => {
+                if state.minorversion != 0 {
+                    NfsResop4::ReleaseLockowner(NfsStat4::Notsupp)
+                } else {
+                    // We do not track per-lockowner sequence state separately
+                    // from open-owners, so releasing one is a no-op success.
+                    NfsResop4::ReleaseLockowner(NfsStat4::Ok)
+                }
+            }
             NfsArgop4::Lock(args) => {
                 self.op_lock(
                     request_ctx,

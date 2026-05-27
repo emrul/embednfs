@@ -6,7 +6,8 @@ use embednfs_proto::{
     BindConnToSessionArgs4, BindConnToSessionRes4, ChannelAttrs4, Clientid4, CreateSessionArgs4,
     CreateSessionRes4, EXCHGID4_FLAG_CONFIRMED_R, EXCHGID4_FLAG_USE_NON_PNFS, ExchangeIdArgs4,
     ExchangeIdRes4, NfsImplId4, NfsStat4, NfsTime4, OpenClaim4,
-    SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED, Sessionid4, StateProtect4R,
+    SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED, Sessionid4, SetClientIdArgs4, SetClientIdConfirmArgs4,
+    SetClientIdRes4, StateProtect4R, Verifier4,
 };
 
 use super::model::{ClientLeaseState, ClientState, SessionState, SlotState, StateInner};
@@ -84,6 +85,7 @@ impl StateManager {
                     lease_state: ClientLeaseState::Active {
                         deadline: self.lease_deadline(now),
                     },
+                    v40_confirm: None,
                 },
             );
             (id, 1, false)
@@ -376,6 +378,134 @@ impl StateManager {
             .retain(|_, session| session.clientid != clientid);
         Self::revoke_client_state(inner, clientid);
         inner.clients.remove(&clientid).is_some()
+    }
+
+    /// Handle NFSv4.0 SETCLIENTID (RFC 7530 §16.33). Inserts an unconfirmed
+    /// client lease and returns the clientid plus a server-chosen confirm
+    /// verifier the client must echo back in SETCLIENTID_CONFIRM.
+    pub(crate) async fn set_client_id(&self, args: &SetClientIdArgs4) -> SetClientIdRes4 {
+        let mut inner = self.inner.write().await;
+        let now = self.config.now();
+        self.reap_expired_clients_locked(&mut inner, now);
+
+        // Drop any prior unconfirmed entries for the same owner so a retried
+        // SETCLIENTID always issues a fresh record. A confirmed client whose
+        // verifier still matches keeps its lease — re-issuing a new clientid
+        // would needlessly revoke its state (§16.33.5).
+        let existing = inner
+            .clients
+            .values()
+            .find(|c| {
+                c.owner.ownerid == args.client.ownerid
+                    && c.owner.verifier == args.client.verifier
+                    && c.confirmed
+            })
+            .map(|c| c.clientid);
+        let stale: Vec<Clientid4> = inner
+            .clients
+            .values()
+            .filter(|c| c.owner.ownerid == args.client.ownerid && !c.confirmed)
+            .map(|c| c.clientid)
+            .collect();
+        for id in stale {
+            let _ = Self::drop_client_state(&mut inner, id);
+        }
+
+        let clientid =
+            existing.unwrap_or_else(|| self.next_clientid.fetch_add(1, Ordering::Relaxed));
+        let confirm_verifier = self.next_v40_confirm_verifier(clientid);
+
+        if let Some(existing_id) = existing {
+            if let Some(client) = inner.clients.get_mut(&existing_id) {
+                client.v40_confirm = Some(confirm_verifier);
+                client.lease_state = ClientLeaseState::Active {
+                    deadline: self.lease_deadline(now),
+                };
+            }
+        } else {
+            let _ = inner.clients.insert(
+                clientid,
+                ClientState {
+                    clientid,
+                    owner: args.client.clone(),
+                    confirmed: false,
+                    reclaim_complete_global: false,
+                    sequence_id: 1,
+                    replaced_clientid: None,
+                    lease_state: ClientLeaseState::Active {
+                        deadline: self.lease_deadline(now),
+                    },
+                    v40_confirm: Some(confirm_verifier),
+                },
+            );
+        }
+
+        SetClientIdRes4 {
+            clientid,
+            setclientid_confirm: confirm_verifier,
+        }
+    }
+
+    /// Handle NFSv4.0 SETCLIENTID_CONFIRM (RFC 7530 §16.34). Validates the
+    /// verifier the server returned earlier and promotes the client to
+    /// confirmed.
+    pub(crate) async fn set_client_id_confirm(
+        &self,
+        args: &SetClientIdConfirmArgs4,
+    ) -> Result<(), NfsStat4> {
+        let mut inner = self.inner.write().await;
+        let now = self.config.now();
+        self.reap_expired_clients_locked(&mut inner, now);
+
+        let client = inner
+            .clients
+            .get_mut(&args.clientid)
+            .ok_or(NfsStat4::StaleClientid)?;
+
+        match client.v40_confirm {
+            Some(expected) if expected == args.verifier => {
+                client.v40_confirm = None;
+                client.confirmed = true;
+                client.lease_state = ClientLeaseState::Active {
+                    deadline: self.lease_deadline(now),
+                };
+                Ok(())
+            }
+            _ => Err(NfsStat4::StaleClientid),
+        }
+    }
+
+    /// Handle NFSv4.0 RENEW (RFC 7530 §16.35). Extends the lease deadline
+    /// for the named clientid or reports lease expiry.
+    pub(crate) async fn renew(&self, clientid: Clientid4) -> Result<(), NfsStat4> {
+        let mut inner = self.inner.write().await;
+        let now = self.config.now();
+        let client = inner
+            .clients
+            .get_mut(&clientid)
+            .ok_or(NfsStat4::StaleClientid)?;
+        if !client.confirmed {
+            return Err(NfsStat4::StaleClientid);
+        }
+        match client.lease_state {
+            ClientLeaseState::Active { .. } => {
+                client.lease_state = ClientLeaseState::Active {
+                    deadline: self.lease_deadline(now),
+                };
+                Ok(())
+            }
+            ClientLeaseState::Revoked { .. } => Err(NfsStat4::Expired),
+        }
+    }
+
+    fn next_v40_confirm_verifier(&self, clientid: Clientid4) -> Verifier4 {
+        // Mix the boot verifier with the issued clientid so two SETCLIENTID
+        // calls from the same owner always get distinct confirm tokens, and
+        // confirm tokens never collide across server restarts.
+        let mut buf = [0u8; 8];
+        let boot = u64::from_be_bytes(self.write_verifier);
+        buf.copy_from_slice(&(boot ^ clientid).to_be_bytes());
+        buf
     }
 
     pub(super) fn client_has_active_state(inner: &StateInner, clientid: Clientid4) -> bool {
