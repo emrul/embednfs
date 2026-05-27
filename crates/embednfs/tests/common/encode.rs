@@ -191,6 +191,35 @@ pub fn encode_putrootfh() -> Vec<u8> {
     buf.to_vec()
 }
 
+/// NFSv4.0 SETCLIENTID with a fixed callback shape that mirrors what
+/// macOS mount_nfs emits (cb_netid=tcp, cb_addr=empty, callback_ident=0).
+pub fn encode_setclientid(verifier: &[u8; 8], ownerid: &[u8]) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_SETCLIENTID.encode(&mut buf);
+    buf.put_slice(verifier);
+    encode_opaque(&mut buf, ownerid);
+    0u32.encode(&mut buf); // cb_program
+    "tcp".to_string().encode(&mut buf); // cb_netid
+    "0.0.0.0.0.0".to_string().encode(&mut buf); // cb_addr (universal-address form)
+    0u32.encode(&mut buf); // callback_ident
+    buf.to_vec()
+}
+
+pub fn encode_setclientid_confirm(clientid: u64, confirm_verifier: &[u8; 8]) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_SETCLIENTID_CONFIRM.encode(&mut buf);
+    clientid.encode(&mut buf);
+    buf.put_slice(confirm_verifier);
+    buf.to_vec()
+}
+
+pub fn encode_renew(clientid: u64) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_RENEW.encode(&mut buf);
+    clientid.encode(&mut buf);
+    buf.to_vec()
+}
+
 pub fn encode_putpubfh() -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_PUTPUBFH.encode(&mut buf);

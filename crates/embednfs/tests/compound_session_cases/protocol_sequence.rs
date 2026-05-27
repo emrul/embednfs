@@ -60,6 +60,119 @@ async fn test_minorversion_zero_accepts_putrootfh() {
     assert_eq!(num_results, 1);
 }
 
+/// Full NFSv4.0 mount handshake: SETCLIENTID → SETCLIENTID_CONFIRM →
+/// PUTROOTFH → GETATTR. Verifies the v4.0 client-id lifecycle plus the
+/// minorversion=0 dispatch wiring. This is the kernel path macOS
+/// `mount_nfs -o vers=4` follows.
+/// Origin: portal-sync §13 phase-0 mac-client probe; RFC 7530 §16.33–§16.34.
+/// RFC: RFC 7530 §16.33, §16.34.
+#[tokio::test]
+async fn test_v40_setclientid_handshake() {
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+
+    let verifier = [1u8, 2, 3, 4, 5, 6, 7, 8];
+    let ownerid = b"v40-test-client";
+
+    // 1. SETCLIENTID — expect Ok and a (clientid, confirm_verifier) pair.
+    let op = encode_setclientid(&verifier, ownerid);
+    let compound = encode_compound_minor("setclientid", 0, &[&op[..]]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);
+    assert_eq!(accept_stat, 0);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_SETCLIENTID);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (clientid, confirm_verifier) = parse_setclientid_res(&mut resp);
+    assert!(clientid != 0);
+
+    // 2. SETCLIENTID_CONFIRM — must echo the verifier the server returned.
+    let op = encode_setclientid_confirm(clientid, &confirm_verifier);
+    let compound = encode_compound_minor("setclientid-confirm", 0, &[&op[..]]);
+    let mut resp = send_rpc(&mut stream, 2, 1, &compound).await;
+    let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);
+    assert_eq!(accept_stat, 0);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_SETCLIENTID_CONFIRM);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+
+    // 3. PUTROOTFH + GETATTR — confirms the bare COMPOUND path works at v4.0.
+    let put = encode_putrootfh();
+    let getattr = encode_getattr(&[]);
+    let compound = encode_compound_minor("rootfh-getattr", 0, &[&put[..], &getattr[..]]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);
+    assert_eq!(accept_stat, 0);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 2);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTROOTFH);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_GETATTR);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+}
+
+/// SETCLIENTID_CONFIRM with the wrong verifier must return
+/// NFS4ERR_STALE_CLIENTID (RFC 7530 §16.34).
+/// Origin: portal-sync §13 phase-0 mac-client probe.
+/// RFC: RFC 7530 §16.34.
+#[tokio::test]
+async fn test_v40_setclientid_confirm_rejects_bad_verifier() {
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+
+    let op = encode_setclientid(&[7u8; 8], b"v40-bad-confirm");
+    let compound = encode_compound_minor("setclientid", 0, &[&op[..]]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let (_opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (clientid, _real_verifier) = parse_setclientid_res(&mut resp);
+
+    let bogus = [0xffu8; 8];
+    let op = encode_setclientid_confirm(clientid, &bogus);
+    let compound = encode_compound_minor("setclientid-confirm-bad", 0, &[&op[..]]);
+    let mut resp = send_rpc(&mut stream, 2, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::StaleClientid as u32);
+}
+
+/// SETCLIENTID and friends must be rejected by an NFSv4.1 server
+/// (minorversion=1) per RFC 8881 §16 mandatory not-to-implement list.
+/// At v4.1 the first-op-must-be-SEQUENCE check fires first, so the
+/// rejection surfaces as `NFS4ERR_OP_NOT_IN_SESSION` rather than
+/// `NFS4ERR_NOTSUPP`. Both forms are correct rejections; the test
+/// guards against accidental v4.0 dispatch in a v4.1 COMPOUND.
+/// Origin: RFC 8881 §16 (must-not-implement v4.0 ops at v4.1).
+/// RFC: RFC 8881 §16, §2.10.6.4.
+#[tokio::test]
+async fn test_v40_ops_rejected_at_minorversion_one() {
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+
+    let op = encode_setclientid(&[2u8; 8], b"v41-rejects-v40");
+    let compound = encode_compound_minor("v41-rejects-setclientid", 1, &[&op[..]]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    let rejected = status == NfsStat4::OpNotInSession as u32 || status == NfsStat4::Notsupp as u32;
+    assert!(
+        rejected,
+        "expected NFS4ERR_OP_NOT_IN_SESSION or NFS4ERR_NOTSUPP, got {status}"
+    );
+}
+
 /// Empty COMPOUND with minorversion=1 and zero ops must succeed.
 /// Origin: `pynfs/nfs4.1/server41tests/st_compound.py` (CODE `COMP1`).
 /// RFC: RFC 8881 §2.10.6.4.

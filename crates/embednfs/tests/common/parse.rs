@@ -157,6 +157,14 @@ pub fn skip_sequence_res(resp: &mut Bytes) {
     let _status_flags = u32::decode(resp).unwrap();
 }
 
+pub fn parse_setclientid_res(resp: &mut Bytes) -> (u64, [u8; 8]) {
+    let clientid = u64::decode(resp).unwrap();
+    let mut verifier = [0u8; 8];
+    let data = decode_fixed_opaque(resp, 8).unwrap();
+    verifier.copy_from_slice(&data);
+    (clientid, verifier)
+}
+
 pub fn parse_create_session_res(resp: &mut Bytes) -> [u8; 16] {
     let session_data = decode_fixed_opaque(resp, 16).unwrap();
     let mut sessionid = [0u8; 16];
