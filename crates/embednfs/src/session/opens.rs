@@ -71,6 +71,31 @@ impl StateManager {
         Ok(Stateid4 { seqid: 1, other })
     }
 
+    /// NFSv4.0 OPEN_CONFIRM (RFC 7530 §16.18): validate the stateid the
+    /// client received from OPEN, bump the stored `stateid_seq`, and return
+    /// the bumped stateid. v4.1 clients never call this — sessions subsume
+    /// the confirm step.
+    pub(crate) async fn confirm_open_state(
+        &self,
+        stateid: &Stateid4,
+    ) -> Result<Stateid4, NfsStat4> {
+        self.reap_expired_clients().await;
+        let mut inner = self.inner.write().await;
+        let state = inner
+            .open_files
+            .get_mut(&stateid.other)
+            .ok_or(NfsStat4::BadStateid)?;
+        if !state.active {
+            return Err(NfsStat4::BadStateid);
+        }
+        Self::validate_stateid_seq(state.stateid_seq, stateid.seqid)?;
+        state.stateid_seq = state.stateid_seq.wrapping_add(1);
+        Ok(Stateid4 {
+            seqid: state.stateid_seq,
+            other: stateid.other,
+        })
+    }
+
     pub(super) fn validate_stateid_seq(stored_seq: u32, provided_seq: u32) -> Result<(), NfsStat4> {
         if provided_seq == 0 || provided_seq == stored_seq {
             Ok(())

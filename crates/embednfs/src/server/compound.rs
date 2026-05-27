@@ -364,13 +364,16 @@ impl<F: FileSystem> NfsServer<F> {
                 if state.minorversion != 0 {
                     NfsResop4::OpenConfirm(NfsStat4::Notsupp, None)
                 } else {
-                    // RFC 7530 §16.18: bump the open stateid seqid and echo
-                    // it back. Lockowner sequence state is tracked elsewhere;
-                    // for the minimal v4.0 path we treat OPEN_CONFIRM as a
-                    // stateid bump so the client can proceed.
-                    let mut stateid = args.open_stateid;
-                    stateid.seqid = stateid.seqid.wrapping_add(1);
-                    NfsResop4::OpenConfirm(NfsStat4::Ok, Some(stateid))
+                    // RFC 7530 §16.18: validate the stateid we returned in
+                    // OPEN, bump the server-side seqid, return the new
+                    // stateid. Subsequent ops (WRITE etc.) must use the
+                    // bumped seqid — previously we only bumped the response
+                    // and left server state stale, which produced
+                    // NFS4ERR_BAD_STATEID on the next WRITE.
+                    match self.state.confirm_open_state(&args.open_stateid).await {
+                        Ok(stateid) => NfsResop4::OpenConfirm(NfsStat4::Ok, Some(stateid)),
+                        Err(status) => NfsResop4::OpenConfirm(status, None),
+                    }
                 }
             }
             NfsArgop4::Renew(clientid) => {

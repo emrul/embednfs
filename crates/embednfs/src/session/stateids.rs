@@ -52,9 +52,18 @@ impl StateManager {
         Ok(NormalizedStateid::Concrete(*requested))
     }
 
+    /// Resolve a stateid to its open / lock state and check that it belongs
+    /// to the requesting client.
+    ///
+    /// `clientid` is `Some` for NFSv4.1 callers, where the COMPOUND's
+    /// `SEQUENCE` op binds the connection to a clientid. NFSv4.0 callers
+    /// pass `None` because there is no SEQUENCE op — the stateid itself
+    /// stands as the credential, and we trust the lookup over loopback.
+    /// When `clientid` is `Some` we still verify the owning client matches
+    /// (per RFC 8881 §15.1.16.4).
     pub(crate) async fn resolve_stateid(
         &self,
-        clientid: Clientid4,
+        clientid: Option<Clientid4>,
         requested: &Stateid4,
         current_stateid: Option<Stateid4>,
         current_mode: CurrentStateidMode,
@@ -68,7 +77,12 @@ impl StateManager {
 
                 if let Some(open) = inner.open_files.get(&stateid.other) {
                     Self::validate_stateid_seq(open.stateid_seq, stateid.seqid)?;
-                    if !open.active || open.clientid != clientid {
+                    if !open.active {
+                        return Err(NfsStat4::BadStateid);
+                    }
+                    if let Some(cid) = clientid
+                        && open.clientid != cid
+                    {
                         return Err(NfsStat4::BadStateid);
                     }
                     return Ok(ResolvedStateid::Open(ResolvedOpenState {
@@ -80,14 +94,21 @@ impl StateManager {
 
                 if let Some(lock) = inner.lock_files.get(&stateid.other) {
                     Self::validate_stateid_seq(lock.stateid_seq, stateid.seqid)?;
-                    if lock.owner.clientid != clientid {
+                    if let Some(cid) = clientid
+                        && lock.owner.clientid != cid
+                    {
                         return Err(NfsStat4::BadStateid);
                     }
                     let open = inner
                         .open_files
                         .get(&lock.open_state_other)
                         .ok_or(NfsStat4::BadStateid)?;
-                    if !open.active || open.clientid != clientid {
+                    if !open.active {
+                        return Err(NfsStat4::BadStateid);
+                    }
+                    if let Some(cid) = clientid
+                        && open.clientid != cid
+                    {
                         return Err(NfsStat4::BadStateid);
                     }
                     return Ok(ResolvedStateid::Lock(ResolvedLockState {

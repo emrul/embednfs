@@ -27,11 +27,10 @@ impl<F: FileSystem> NfsServer<F> {
         current_stateid: Option<Stateid4>,
         sequence_clientid: Option<Clientid4>,
     ) -> Result<ResolvedStateid, NfsStat4> {
-        let clientid = sequence_clientid.ok_or(NfsStat4::BadStateid)?;
         let resolved = self
             .state
             .resolve_stateid(
-                clientid,
+                sequence_clientid,
                 stateid,
                 current_stateid,
                 CurrentStateidMode::ZeroSeqid,
@@ -151,13 +150,14 @@ impl<F: FileSystem> NfsServer<F> {
             Err(status) => return NfsResop4::Close(status, Stateid4::default()),
         };
 
-        let clientid = match sequence_clientid {
-            Some(clientid) => clientid,
-            None => return NfsResop4::Close(NfsStat4::BadStateid, Stateid4::default()),
-        };
         match self
             .state
-            .resolve_stateid(clientid, &stateid, None, CurrentStateidMode::PreserveSeqid)
+            .resolve_stateid(
+                sequence_clientid,
+                &stateid,
+                None,
+                CurrentStateidMode::PreserveSeqid,
+            )
             .await
         {
             Ok(ResolvedStateid::Open(open)) if open.object == object => {}
@@ -630,10 +630,6 @@ impl<F: FileSystem> NfsServer<F> {
         current_stateid: Option<Stateid4>,
         sequence_clientid: Option<Clientid4>,
     ) -> NfsResop4 {
-        let clientid = match sequence_clientid {
-            Some(clientid) => clientid,
-            None => return NfsResop4::OpenDowngrade(NfsStat4::BadStateid, None),
-        };
         let stateid = match self.state.normalize_stateid(
             &args.open_stateid,
             current_stateid,
@@ -651,7 +647,12 @@ impl<F: FileSystem> NfsServer<F> {
 
         match self
             .state
-            .resolve_stateid(clientid, &stateid, None, CurrentStateidMode::PreserveSeqid)
+            .resolve_stateid(
+                sequence_clientid,
+                &stateid,
+                None,
+                CurrentStateidMode::PreserveSeqid,
+            )
             .await
         {
             Ok(ResolvedStateid::Open(_)) => {}

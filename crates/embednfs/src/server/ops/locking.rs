@@ -54,7 +54,12 @@ impl<F: FileSystem> NfsServer<F> {
                 };
                 match self
                     .state
-                    .resolve_stateid(clientid, &open_stateid, None, CurrentStateidMode::ZeroSeqid)
+                    .resolve_stateid(
+                        Some(clientid),
+                        &open_stateid,
+                        None,
+                        CurrentStateidMode::ZeroSeqid,
+                    )
                     .await
                 {
                     Ok(ResolvedStateid::Open(open)) if open.object == object => {}
@@ -105,7 +110,12 @@ impl<F: FileSystem> NfsServer<F> {
                 };
                 let (_lock_object, owner) = match self
                     .state
-                    .resolve_stateid(clientid, &lock_stateid, None, CurrentStateidMode::ZeroSeqid)
+                    .resolve_stateid(
+                        Some(clientid),
+                        &lock_stateid,
+                        None,
+                        CurrentStateidMode::ZeroSeqid,
+                    )
                     .await
                 {
                     Ok(ResolvedStateid::Lock(lock)) if lock.object == object => {
@@ -208,7 +218,12 @@ impl<F: FileSystem> NfsServer<F> {
         };
         match self
             .state
-            .resolve_stateid(clientid, &stateid, None, CurrentStateidMode::ZeroSeqid)
+            .resolve_stateid(
+                Some(clientid),
+                &stateid,
+                None,
+                CurrentStateidMode::ZeroSeqid,
+            )
             .await
         {
             Ok(ResolvedStateid::Lock(lock)) if lock.object == object => {}
