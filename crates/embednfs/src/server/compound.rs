@@ -118,13 +118,6 @@ impl<F: FileSystem> NfsServer<F> {
                     overall_status = NfsStat4::ClientidBusy;
                     break;
                 }
-
-                if let NfsArgop4::MustNotImplement(opcode) = &op {
-                    let res = NfsResop4::MustNotImplement(*opcode, NfsStat4::Notsupp);
-                    resarray.push(res);
-                    overall_status = NfsStat4::Notsupp;
-                    break;
-                }
             }
 
             let res = if idx == 0 {
@@ -358,7 +351,11 @@ impl<F: FileSystem> NfsServer<F> {
                 NfsResop4::TestStateid(NfsStat4::Ok, results)
             }
             NfsArgop4::DelegReturn(_) => NfsResop4::DelegReturn(NfsStat4::Ok),
-            NfsArgop4::MustNotImplement(op) => NfsResop4::MustNotImplement(*op, NfsStat4::Notsupp),
+            NfsArgop4::OpenConfirm(_) => NfsResop4::OpenConfirm(NfsStat4::Notsupp, None),
+            NfsArgop4::Renew(_) => NfsResop4::Renew(NfsStat4::Notsupp),
+            NfsArgop4::SetClientId(_) => NfsResop4::SetClientId(NfsStat4::Notsupp, None),
+            NfsArgop4::SetClientIdConfirm(_) => NfsResop4::SetClientIdConfirm(NfsStat4::Notsupp),
+            NfsArgop4::ReleaseLockowner(_) => NfsResop4::ReleaseLockowner(NfsStat4::Notsupp),
             NfsArgop4::Lock(args) => {
                 self.op_lock(
                     request_ctx,
@@ -536,7 +533,11 @@ fn error_res_for_op(op: &NfsArgop4, status: NfsStat4) -> NfsResop4 {
         NfsArgop4::FreeStateid(_) => NfsResop4::FreeStateid(status),
         NfsArgop4::TestStateid(_) => NfsResop4::TestStateid(status, vec![]),
         NfsArgop4::DelegReturn(_) => NfsResop4::DelegReturn(status),
-        NfsArgop4::MustNotImplement(op) => NfsResop4::MustNotImplement(*op, status),
+        NfsArgop4::OpenConfirm(_) => NfsResop4::OpenConfirm(status, None),
+        NfsArgop4::Renew(_) => NfsResop4::Renew(status),
+        NfsArgop4::SetClientId(_) => NfsResop4::SetClientId(status, None),
+        NfsArgop4::SetClientIdConfirm(_) => NfsResop4::SetClientIdConfirm(status),
+        NfsArgop4::ReleaseLockowner(_) => NfsResop4::ReleaseLockowner(status),
         NfsArgop4::Lock(_) => NfsResop4::Lock(status, None, None),
         NfsArgop4::Lockt(_) => NfsResop4::Lockt(status, None),
         NfsArgop4::Locku(_) => NfsResop4::Locku(status, None),
@@ -599,7 +600,11 @@ fn argop_name(op: &NfsArgop4) -> &'static str {
         NfsArgop4::FreeStateid(_) => "FREE_STATEID",
         NfsArgop4::TestStateid(_) => "TEST_STATEID",
         NfsArgop4::DelegReturn(_) => "DELEGRETURN",
-        NfsArgop4::MustNotImplement(_) => "MUST_NOT_IMPLEMENT",
+        NfsArgop4::OpenConfirm(_) => "OPEN_CONFIRM",
+        NfsArgop4::Renew(_) => "RENEW",
+        NfsArgop4::SetClientId(_) => "SETCLIENTID",
+        NfsArgop4::SetClientIdConfirm(_) => "SETCLIENTID_CONFIRM",
+        NfsArgop4::ReleaseLockowner(_) => "RELEASE_LOCKOWNER",
         NfsArgop4::Lock(_) => "LOCK",
         NfsArgop4::Lockt(_) => "LOCKT",
         NfsArgop4::Locku(_) => "LOCKU",
@@ -662,7 +667,11 @@ fn res_status(res: &NfsResop4) -> NfsStat4 {
         NfsResop4::FreeStateid(s) => *s,
         NfsResop4::TestStateid(s, _) => *s,
         NfsResop4::DelegReturn(s) => *s,
-        NfsResop4::MustNotImplement(_, s) => *s,
+        NfsResop4::OpenConfirm(s, _) => *s,
+        NfsResop4::Renew(s) => *s,
+        NfsResop4::SetClientId(s, _) => *s,
+        NfsResop4::SetClientIdConfirm(s) => *s,
+        NfsResop4::ReleaseLockowner(s) => *s,
         NfsResop4::Lock(s, _, _) => *s,
         NfsResop4::Lockt(s, _) => *s,
         NfsResop4::Locku(s, _) => *s,
@@ -725,7 +734,11 @@ fn resop_name(res: &NfsResop4) -> &'static str {
         NfsResop4::FreeStateid(_) => "FREE_STATEID",
         NfsResop4::TestStateid(_, _) => "TEST_STATEID",
         NfsResop4::DelegReturn(_) => "DELEGRETURN",
-        NfsResop4::MustNotImplement(_, _) => "MUST_NOT_IMPLEMENT",
+        NfsResop4::OpenConfirm(_, _) => "OPEN_CONFIRM",
+        NfsResop4::Renew(_) => "RENEW",
+        NfsResop4::SetClientId(_, _) => "SETCLIENTID",
+        NfsResop4::SetClientIdConfirm(_) => "SETCLIENTID_CONFIRM",
+        NfsResop4::ReleaseLockowner(_) => "RELEASE_LOCKOWNER",
         NfsResop4::Lock(_, _, _) => "LOCK",
         NfsResop4::Lockt(_, _) => "LOCKT",
         NfsResop4::Locku(_, _) => "LOCKU",

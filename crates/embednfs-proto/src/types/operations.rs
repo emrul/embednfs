@@ -3,7 +3,6 @@ use bytes::BytesMut;
 use crate::xdr::{XdrDecode, XdrEncode, XdrResult};
 
 use super::basic::*;
-use super::constants::*;
 use super::session::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,26 +49,47 @@ pub enum WhyNoDelegation4 {
     IsDir = 8,
 }
 
-/// NFSv4.0 operations that RFC 8881 marks as mandatory not-to-implement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MustNotImplementOp4 {
-    OpenConfirm,
-    Renew,
-    SetClientId,
-    SetClientIdConfirm,
-    ReleaseLockowner,
+/// NFSv4.0 OPEN_CONFIRM arguments (RFC 7530 §16.18).
+#[derive(Debug)]
+pub struct OpenConfirmArgs4 {
+    pub open_stateid: Stateid4,
+    pub seqid: Seqid4,
 }
 
-impl MustNotImplementOp4 {
-    pub fn opcode(self) -> u32 {
-        match self {
-            MustNotImplementOp4::OpenConfirm => OP_OPEN_CONFIRM,
-            MustNotImplementOp4::Renew => OP_RENEW,
-            MustNotImplementOp4::SetClientId => OP_SETCLIENTID,
-            MustNotImplementOp4::SetClientIdConfirm => OP_SETCLIENTID_CONFIRM,
-            MustNotImplementOp4::ReleaseLockowner => OP_RELEASE_LOCKOWNER,
-        }
-    }
+/// NFSv4.0 callback address parsed from the netaddr4 pair on the wire.
+#[derive(Debug)]
+pub struct NfsClientCallback4 {
+    pub cb_program: u32,
+    pub cb_netid: String,
+    pub cb_addr: String,
+}
+
+/// NFSv4.0 SETCLIENTID arguments (RFC 7530 §16.33).
+#[derive(Debug)]
+pub struct SetClientIdArgs4 {
+    pub client: ClientOwner4,
+    pub callback: NfsClientCallback4,
+    pub callback_ident: u32,
+}
+
+/// NFSv4.0 SETCLIENTID_CONFIRM arguments (RFC 7530 §16.34).
+#[derive(Debug)]
+pub struct SetClientIdConfirmArgs4 {
+    pub clientid: Clientid4,
+    pub verifier: Verifier4,
+}
+
+/// NFSv4.0 RELEASE_LOCKOWNER arguments (RFC 7530 §16.37).
+#[derive(Debug)]
+pub struct ReleaseLockownerArgs4 {
+    pub lock_owner: StateOwner4,
+}
+
+/// NFSv4.0 SETCLIENTID success result (RFC 7530 §16.33).
+#[derive(Debug)]
+pub struct SetClientIdRes4 {
+    pub clientid: Clientid4,
+    pub setclientid_confirm: Verifier4,
 }
 
 #[derive(Debug)]
@@ -586,7 +606,11 @@ pub enum NfsArgop4 {
     FreeStateid(FreeStateidArgs4),
     TestStateid(TestStateidArgs4),
     DelegReturn(DelegReturnArgs4),
-    MustNotImplement(MustNotImplementOp4),
+    OpenConfirm(OpenConfirmArgs4),
+    Renew(Clientid4),
+    SetClientId(SetClientIdArgs4),
+    SetClientIdConfirm(SetClientIdConfirmArgs4),
+    ReleaseLockowner(ReleaseLockownerArgs4),
     Lock(LockArgs4),
     Lockt(LocktArgs4),
     Locku(LockuArgs4),
@@ -720,7 +744,11 @@ pub enum NfsResop4 {
     FreeStateid(NfsStat4),
     TestStateid(NfsStat4, Vec<NfsStat4>),
     DelegReturn(NfsStat4),
-    MustNotImplement(MustNotImplementOp4, NfsStat4),
+    OpenConfirm(NfsStat4, Option<Stateid4>),
+    Renew(NfsStat4),
+    SetClientId(NfsStat4, Option<SetClientIdRes4>),
+    SetClientIdConfirm(NfsStat4),
+    ReleaseLockowner(NfsStat4),
     Lock(NfsStat4, Option<Stateid4>, Option<LockDenied4>),
     Lockt(NfsStat4, Option<LockDenied4>),
     Locku(NfsStat4, Option<Stateid4>),
