@@ -183,72 +183,92 @@ Hypotheses 2 and 4 have been **eliminated** by live testing (see
 
 ## Suggested next steps
 
-### Step 1 — Packet capture, in any order (15 min)
+### Step 1 — `dtruss` the failing syscall (10 min, settles hypothesis 1)
 
-Settles (1) by definition.
+The synchronous `EINVAL` says the kernel rejects the request before any
+RPC. `dtruss` will tell us exactly which syscall and what arg shape.
 
 ```bash
 # Terminal A
-RUST_LOG=embednfs=trace cargo run --release -p embednfsd
+RUST_LOG=embednfs=trace ./target/release/embednfsd
 # Terminal B
+sudo dtruss -f mount_nfs -v -o vers=4,tcp,port=2049,nolocks,nobrowse \
+    127.0.0.1:/ /tmp/test 2>&1 \
+  | grep -E 'mount|nfs|connect|EINVAL|= -1' \
+  | tee /tmp/dtruss.log
+```
+
+If SIP blocks `dtruss` against `mount_nfs` (likely on standard 15.5):
+
+```bash
+sudo csrutil status   # check SIP state
+# Workaround: copy mount_nfs to a writable path so dtruss can attach.
+cp /sbin/mount_nfs /tmp/mount_nfs.local
+sudo chmod +x /tmp/mount_nfs.local
+sudo dtruss -f /tmp/mount_nfs.local -v -o vers=4,tcp,port=2049,nolocks,nobrowse \
+    127.0.0.1:/ /tmp/test 2>&1 | grep -E 'mount|EINVAL|= -1' | tee /tmp/dtruss.log
+```
+
+What to look for:
+
+- The line containing `mount(...) = -1 Err#22 EINVAL`. The `mount(2)`
+  syscall on macOS NFSv4 takes a `data` argument that points at a
+  serialized `nfs_args` / `nfs_args_v8` blob. The error indicates which
+  field tripped the validator.
+- `connect()` to 127.0.0.1:2049 returning before the failing `mount()`
+  would explain the two transient TCP sessions in the server log.
+
+### Step 2 — Packet capture (5 min, settles hypothesis 2)
+
+Cheap secondary signal. Confirms there is no UDP/111 traffic
+(eliminates the rpcbind theory) and shows the connect/RST timing.
+
+```bash
 sudo tcpdump -i lo0 -nn -X 'port 2049 or port 111' -w /tmp/macos-mount.pcap &
-mount_nfs -v -o vers=4,tcp,port=2049,nolocks,nobrowse 127.0.0.1:/ /tmp/test 2>&1
+sudo mount_nfs -v -o vers=4,tcp,port=2049,nolocks,nobrowse \
+    127.0.0.1:/tree-a /tmp/test
 sudo killall tcpdump
-```
-
-Then inspect with:
-
-```bash
 sudo tcpdump -r /tmp/macos-mount.pcap -nn -A | head -200
-# or in Wireshark with the "Sun RPC" / "NFS" dissectors
 ```
 
-What to look for, in priority order:
+Expected: TCP SYN → SYN/ACK → ACK → FIN/RST, with no RPC record markers
+(four-byte `80 00 00 xx`) ever sent. Confirms the kernel is bailing
+pre-RPC and the failure is in syscall-arg validation, not on the wire.
 
-- UDP/111 traffic at all → confirms hypothesis (1).
-- TCP/2049 SYN/ACK then immediate FIN/RST from the client → look at the
-  client TCP options for socket-buffer / source-port indicators of (2).
-- Any RPC payload (`80 00 00 ..` record marker followed by `NFS
-  PROGRAM=100003`) — would tell us the COMPOUND that's being attempted
-  and the server's response (or non-response).
+### Step 3 — Apple's NFS client source
 
-### Step 2 — Eliminate privileged-port theory (5 min)
-
-```bash
-sudo mount_nfs -v -o vers=4,tcp,port=2049,nolocks,nobrowse 127.0.0.1:/ /tmp/test
-```
-
-If `sudo` succeeds where unprivileged fails, hypothesis (2) is the
-answer. The fix is documenting that macOS mounts need either
-`sudo`/setuid or a kernel-side relaxation we cannot do from user space.
-
-### Step 3 — Cross-reference Apple's NFS client source
-
-Apple ships the macOS NFS client at:
+`mount_nfs` and the kernel-side NFS code are open source:
 
 <https://github.com/apple-oss-distributions/NFS>
 
-Read `mount_nfs/mount_nfs.c` (the userland entry) and
-`NFS/nfs_socket.c` (the kernel side) for the connect path. Specifically:
+Start at `mount_nfs/mount_nfs.c` — find the call site for the
+`mount(2)` syscall (it builds an `nfs_args_v8` / `nfs_mount_args` blob
+and passes it as the `data` argument). Then cross-reference with
+`NFS/nfs_vfsops.c` in the kernel-side tree, scanning for the `EINVAL`
+returns in `nfs_vfs_mount` / `nfs_mount_args_check` (names may differ
+by version).
 
-- Trace what happens between `nfsmount` syscall setup and the first
-  `mbuf` send. The "Invalid argument" / `EINVAL` we see has to be
-  emitted by one of those layers.
-- Check whether the kernel client requires `mountport=` to be set for
-  v4 mounts. Some legacy paths still do.
+Specific things known to trip macOS NFSv4 mounts:
 
-### Step 4 — If Steps 1–3 do not yield an answer, try the public-NFS path
+- Missing or empty `path` field (the `127.0.0.1:/tree-a` parsing).
+- Server "address" embedded in the args blob in an unexpected `struct
+  sockaddr` form.
+- An expected `mountport=` value when `nfsproto=` is TCP-only.
 
-NFSv4 has a `PUTPUBFH` op and a "public filehandle" model that some
-kernel clients fall back to when the export path resolution is
-ambiguous. `mount_nfs -o public 127.0.0.1:/ /tmp/test` may behave
-differently — worth one attempt.
+### Step 4 — If steps 1–3 still leave it open
+
+- Try `mount_nfs -o public 127.0.0.1:/ /tmp/test` — the NFSv4 public
+  filehandle path may sidestep whatever validation is failing.
+- Try `mount_nfs -o vers=4,mountport=2049,nfsproto=tcp,...` — some
+  legacy macOS paths require an explicit `mountport=`.
+- Try `mount_nfs -o vers=4,negnamecache=off,namedattr,...` — strip
+  every advisory option to a minimum and add back one at a time.
 
 ### Step 5 — Validation harness
 
 Once a mount succeeds, fold the working command line back into
-`scripts/smoke-macos-nfs41.sh` (or rename it `scripts/smoke-macos-nfs40.sh`
-since macOS is on v4.0) so the regression is caught next time. The
+`scripts/smoke-macos-nfs41.sh` (rename to `scripts/smoke-macos-nfs40.sh`
+since macOS is on v4.0) so this regression is caught next time. The
 existing script's `vers=4.1` should be replaced with whatever Step 1–4
 proves to work.
 
