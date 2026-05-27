@@ -430,10 +430,7 @@ impl<F: FileSystem> NfsServer<F> {
             let stats = if needs_stats {
                 match self.statfs_for_object(request_ctx, object).await {
                     Ok(stats) => Some(stats),
-                    Err(e) => {
-                        trace!("readdir: skipping entry {name:?}: {e:?}");
-                        continue;
-                    }
+                    Err(e) => return NfsResop4::Readdir(e.to_nfsstat4(), None),
                 }
             } else {
                 None

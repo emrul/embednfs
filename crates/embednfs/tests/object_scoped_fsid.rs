@@ -24,6 +24,7 @@ enum Object {
 #[derive(Debug, Clone)]
 struct ObjectScopedFs {
     inline_readdir_attrs: bool,
+    fail_statfs_for: Option<Object>,
     statfs_calls: Arc<Mutex<Vec<Object>>>,
 }
 
@@ -31,8 +32,14 @@ impl ObjectScopedFs {
     fn new(inline_readdir_attrs: bool) -> Self {
         Self {
             inline_readdir_attrs,
+            fail_statfs_for: None,
             statfs_calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn with_failing_statfs(mut self, handle: Object) -> Self {
+        self.fail_statfs_for = Some(handle);
+        self
     }
 
     fn statfs_calls(&self) -> Vec<Object> {
@@ -95,6 +102,9 @@ impl FileSystem for ObjectScopedFs {
 
     async fn statfs(&self, _ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
         self.statfs_calls.lock().unwrap().push(*handle);
+        if self.fail_statfs_for == Some(*handle) {
+            return Err(FsError::Io);
+        }
         Ok(Self::stats(*handle))
     }
 
@@ -299,6 +309,24 @@ async fn readdir_entries(fs: ObjectScopedFs, bits: &[u32]) -> Vec<ReaddirEntry> 
     entries
 }
 
+async fn readdir_status(fs: ObjectScopedFs, bits: &[u32]) -> u32 {
+    let port = start_server_with_fs(fs).await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let readdir_op = encode_readdir_custom(0, [0u8; 8], 4096, 8192, bits);
+    let compound = encode_compound("object-readdir-status", &[&seq_op, &rootfh_op, &readdir_op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    status
+}
+
 /// GETATTR reports the FSID and stats for the object being encoded.
 /// Origin: design/object-scoped-fsid.md object-scoped GETATTR regression.
 /// RFC: RFC 8881 §5.8.1.9, §18.7.3.
@@ -426,4 +454,16 @@ async fn test_stats_are_fetched_only_for_requested_objects() {
     )
     .await;
     assert!(getattr_no_stats_fs.statfs_calls().is_empty());
+}
+
+/// READDIR fails when requested per-entry stats cannot be fetched.
+/// Origin: regression for object-scoped stats failure handling.
+/// RFC: RFC 8881 §18.23.3.
+#[tokio::test]
+async fn test_readdir_returns_error_when_requested_entry_stats_fail() {
+    let fs = ObjectScopedFs::new(true).with_failing_statfs(Object::TreeA);
+    let status = readdir_status(fs.clone(), &[FATTR4_SPACE_TOTAL]).await;
+
+    assert_eq!(status, NfsStat4::Io as u32);
+    assert_eq!(fs.statfs_calls(), vec![Object::TreeA]);
 }

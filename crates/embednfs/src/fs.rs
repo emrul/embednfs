@@ -246,7 +246,7 @@ pub struct Attrs {
     pub object_type: ObjectType,
     /// Stable NFS filesystem identifier for the filesystem holding this object.
     pub fsid: FsId,
-    /// Stable exported file identifier.
+    /// Stable exported file identifier, unique within `fsid`.
     pub fileid: u64,
     /// Change identifier for cookie verifiers and client cache invalidation.
     pub change: u64,

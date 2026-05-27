@@ -144,7 +144,7 @@ pub trait FileSystem: Send + Sync + 'static {
 Key points:
 
 - `Handle` is opaque backend identity. It is not the NFS wire handle and not the exported `fileid`.
-- `Attrs` carries the exported metadata view, including `fileid`, `change`, times, flags, and ownership.
+- `Attrs` carries the exported metadata view. The stable NFS identity is the `(fsid, fileid)` pair; `fileid` only needs to be unique within its `fsid`.
 - `RequestContext` is passed to every op so adapters can make explicit policy decisions.
 - `readdir()` is paged and cookie-driven, with optional inline attrs for `READDIR` hot paths.
 
