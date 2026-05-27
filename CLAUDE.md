@@ -1,14 +1,14 @@
-# embednfs — Embeddable NFSv4.1 Server Library in Rust
+# embednfs — Embeddable NFSv4.0 + NFSv4.1 Server Library in Rust
 
 ## Goal
 
-Build a production-quality, high-performance Rust NFSv4.1 server library. The user implements a small, opinionated filesystem trait; the library handles the wire protocol, state management, locking, and synthetic NFS-only objects, all served over TCP. The primary use case is embedding as a localhost NFS server — a FUSE replacement that needs no kernel modules. Apple/macOS NFSv4.1 client compatibility is the main implementation target, and Linux compatibility should be preserved where it comes for free.
+Build a production-quality, high-performance Rust NFSv4 server library. The user implements a small, opinionated filesystem trait; the library handles the wire protocol, state management, locking, and synthetic NFS-only objects, all served over TCP. The primary use case is embedding as a localhost NFS server — a FUSE replacement that needs no kernel modules. Apple/macOS client compatibility is the main implementation target; Linux compatibility comes from the v4.1 path where it is needed for xattrs.
 
 This is not a toy or proof-of-concept. It should be correct, fast, and suitable for real workloads. Aim for zero-copy where possible, minimal allocations on the hot path, and a design that can saturate the I/O capabilities of the underlying filesystem implementation.
 
-Strictly NFSv4.1 only (RFC 8881). Do not implement NFSv4.0 compatibility or mix NFSv4.0 semantics — they are different protocols. COMPOUND requests with `minorversion != 1` must be rejected. Do not use NFSv4.0-only libraries, tools, or test clients.
+Supported COMPOUND minor versions are 0, 1, and 2. NFSv4.0 (RFC 7530) exists primarily because the macOS in-kernel `mount_nfs(8)` caps at minor version 0 — embednfs must serve that client through the SETCLIENTID / SETCLIENTID_CONFIRM / RENEW / OPEN_CONFIRM / RELEASE_LOCKOWNER path. NFSv4.1 (RFC 8881) is the path Linux clients use; it adds sessions and the xattr ops (RFC 8276) needed for Linux extended-attribute workflows. Any minor version outside 0..=2 must be rejected with `NFS4ERR_MINOR_VERS_MISMATCH`.
 
-Licensed under the MIT License. The project uses Rust edition 2024. Determine the implementation scope yourself based on what the spec requires, what real clients actually need, and what matters for the localhost FUSE-replacement use case. Keep the public trait as simple as it can be and as complex as it needs to be. Prefer a minimal core trait plus optional capability extensions over one large catch-all interface. Implement what Apple/macOS actually expects; do not keep extra protocol surface unless it is effectively free and low-complexity.
+Licensed under the MIT License. The project uses Rust edition 2024. Determine the implementation scope yourself based on what the spec requires, what real clients actually need, and what matters for the localhost FUSE-replacement use case. Keep the public trait as simple as it can be and as complex as it needs to be. Prefer a minimal core trait plus optional capability extensions over one large catch-all interface. Implement what real clients actually expect; do not keep extra protocol surface unless it is effectively free and low-complexity.
 
 ## Commands
 
@@ -17,9 +17,9 @@ cargo clippy --workspace
 cargo test --workspace
 cargo run -p embednfsd --release
 
-# macOS
-mount_nfs -o vers=4.1,tcp,port=2049 127.0.0.1:/ /tmp/embednfs
-# Linux
+# macOS — kernel mount_nfs(8) caps at vers=4 (minor version 0).
+mount_nfs -o vers=4,tcp,port=2049 127.0.0.1:/ /tmp/embednfs
+# Linux — vers=4.1 picks up the xattr ops.
 mount -t nfs4 -o vers=4.1,proto=tcp,port=2049 127.0.0.1:/ /mnt/embednfs
 ```
 
@@ -58,7 +58,7 @@ Keep the code modular. The recommended file size is under 500 lines. The hard li
 
 ### Abstraction
 
-The filesystem trait is the most important API surface. The library handles all NFSv4.1 state internally — the trait implementor should not think about protocol details.
+The filesystem trait is the most important API surface. The library handles all NFSv4 state internally — clientid leases, session state, opens, locks, and version negotiation — so the trait implementor never thinks about minor versions or protocol details.
 
 ### Dependencies
 

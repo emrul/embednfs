@@ -2,26 +2,26 @@
 
 [![crates.io](https://img.shields.io/crates/v/embednfs)](https://crates.io/crates/embednfs)
 
-An embeddable NFSv4.1 server library in Rust. You implement a small filesystem trait; the library handles the wire protocol, sessions, filehandles, locking, and TCP serving.
+An embeddable NFSv4 server library in Rust. You implement a small filesystem trait; the library handles the wire protocol, sessions, filehandles, locking, and TCP serving over both NFSv4.0 (RFC 7530) and NFSv4.1 (RFC 8881) — the same server speaks both minor versions and lets the client pick.
 
-The implementation target is Apple/macOS NFSv4.1 client compatibility first, with a localhost FUSE-replacement use case. The public API is intentionally opinionated and minimal.
+The primary implementation target is Apple/macOS client compatibility for a localhost FUSE-replacement use case. The macOS in-kernel `mount_nfs(8)` does not advertise minor version 1, so embednfs serves NFSv4.0 on that path; Linux is served via NFSv4.1 where the protocol picks up sessions and the xattr ops (RFC 8276) Linux relies on for extended attributes.
 
 ## Support Boundary
 
 This project currently makes two important non-promises:
 
 - It does **not** guarantee correct or robust behavior over a real network. The target deployment is localhost. Running it over non-localhost transport may work in some cases, but that is not a supported or validated use case.
-- It does **not** guarantee correct behavior for non-macOS clients. The implementation and live validation target the macOS kernel NFSv4.1 client and Finder workflows. Other clients may work, but they are not a compatibility target.
+- It targets macOS first (NFSv4.0 path) and the Linux in-kernel client (NFSv4.1 path) for xattr workflows. Other clients may work, but they are not a compatibility target.
 
-In short: the supported target is **macOS over localhost**.
+In short: the supported target is **macOS / Linux over localhost**.
 
 ## Architecture
 
 This is a Cargo workspace with three crates:
 
-- **`embednfs-proto`** — XDR encoding/decoding and NFSv4.1 protocol types
+- **`embednfs-proto`** — XDR encoding/decoding and NFSv4.0 / NFSv4.1 protocol types
 - **`embednfs`** — Embeddable server library with the filesystem traits and COMPOUND handler
-- **`embednfsd`** — NFSv4.1 server daemon powered by embednfs
+- **`embednfsd`** — NFSv4 server daemon powered by embednfs
 
 ## Quick Start
 
@@ -39,14 +39,14 @@ async fn main() -> std::io::Result<()> {
 Then mount:
 
 ```bash
-# macOS
+# macOS — vers=4 (the only value mount_nfs(8) accepts).
 mkdir -p /tmp/embednfs
-mount_nfs -o vers=4.1,tcp,port=2049 127.0.0.1:/ /tmp/embednfs
+mount_nfs -o vers=4,tcp,port=2049 127.0.0.1:/ /tmp/embednfs
+
+# Linux — vers=4.1 to opt into sessions and xattr ops.
+mkdir -p /mnt/embednfs
+mount -t nfs4 -o vers=4.1,proto=tcp,port=2049 127.0.0.1:/ /mnt/embednfs
 ```
-
-Note: on macOS, `vers=4` means NFSv4.0. Use `vers=4.1` explicitly.
-
-Non-macOS clients are not a supported compatibility target, even if they happen to mount successfully.
 
 ## Filesystem API
 
@@ -200,12 +200,11 @@ Explicitly unsupported:
 - `SET_SSV`
 - `WANT_DELEGATION`
 
-Rejected in NFSv4.1 because they are v4.0-only:
+Implemented for NFSv4.0 mount paths (returned `NFS4ERR_NOTSUPP` if a v4.1 client sends them, per RFC 8881):
 
-- `OPEN_CONFIRM`
+- `SETCLIENTID`, `SETCLIENTID_CONFIRM`
 - `RENEW`
-- `SETCLIENTID`
-- `SETCLIENTID_CONFIRM`
+- `OPEN_CONFIRM`
 - `RELEASE_LOCKOWNER`
 
 ## Testing
