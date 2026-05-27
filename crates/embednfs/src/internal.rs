@@ -1,4 +1,4 @@
-use crate::fs::Attrs;
+use crate::fs::{Attrs, FsId};
 
 /// Internal identifier used to map opaque backend handles to server state.
 pub(crate) type ObjectId = u64;
@@ -24,6 +24,7 @@ pub(crate) enum ServerFileType {
 /// Internal attribute record used by the protocol layer.
 #[derive(Debug, Clone)]
 pub(crate) struct ServerFileAttr {
+    pub fsid: FsId,
     pub fileid: u64,
     pub file_type: ServerFileType,
     pub size: u64,

@@ -154,7 +154,7 @@ impl FileSystem for LocalFs {
         }
     }
 
-    async fn statfs(&self, _ctx: &RequestContext) -> FsResult<FsStats> {
+    async fn statfs(&self, _ctx: &RequestContext, _handle: &Self::Handle) -> FsResult<FsStats> {
         Ok(FsStats::default())
     }
 

@@ -14,7 +14,7 @@ use embednfs_proto::xdr::*;
 use embednfs_proto::*;
 
 use crate::fs::*;
-use crate::internal::ObjectId;
+use crate::internal::{ObjectId, ServerObject};
 use crate::session::StateManager;
 
 const RPC_LAST_FRAGMENT: u32 = 0x8000_0000;
@@ -197,8 +197,21 @@ impl<F: FileSystem> NfsServer<F> {
         self.fs.limits()
     }
 
-    async fn statfs(&self, ctx: &RequestContext) -> NfsResult<FsStats> {
-        self.fs.statfs(ctx).await
+    async fn statfs(&self, ctx: &RequestContext, id: ObjectId) -> NfsResult<FsStats> {
+        let handle = self.resolve_backend_handle(id).await?;
+        self.fs.statfs(ctx, &handle).await
+    }
+
+    async fn statfs_for_object(
+        &self,
+        ctx: &RequestContext,
+        object: &ServerObject,
+    ) -> NfsResult<FsStats> {
+        match object {
+            ServerObject::Fs(id)
+            | ServerObject::NamedAttrDir(id)
+            | ServerObject::NamedAttrFile { parent: id, .. } => self.statfs(ctx, *id).await,
+        }
     }
 
     async fn getattr(&self, ctx: &RequestContext, id: ObjectId) -> NfsResult<Attrs> {

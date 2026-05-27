@@ -38,8 +38,9 @@ impl FileSystem for MemFs {
         }
     }
 
-    async fn statfs(&self, _ctx: &RequestContext) -> FsResult<FsStats> {
+    async fn statfs(&self, _ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
         let inner = self.inner.read().await;
+        let _ = inner.inodes.get(handle).ok_or(FsError::Stale)?;
         let used_bytes = inner.inodes.values().fold(0_u64, |total, inode| {
             total.saturating_add(inode.attrs.space_used)
         });

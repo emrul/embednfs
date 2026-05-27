@@ -50,8 +50,8 @@ impl FileSystem for BlockingRemoveFs {
     fn limits(&self) -> embednfs::FsLimits {
         self.inner.limits()
     }
-    async fn statfs(&self, ctx: &RequestContext) -> FsResult<FsStats> {
-        self.inner.statfs(ctx).await
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
+        self.inner.statfs(ctx, handle).await
     }
     async fn getattr(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<Attrs> {
         self.inner.getattr(ctx, handle).await
@@ -176,8 +176,8 @@ impl FileSystem for CountingNamedAttrFs {
     fn limits(&self) -> embednfs::FsLimits {
         self.inner.limits()
     }
-    async fn statfs(&self, ctx: &RequestContext) -> FsResult<FsStats> {
-        self.inner.statfs(ctx).await
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
+        self.inner.statfs(ctx, handle).await
     }
     async fn getattr(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<Attrs> {
         self.inner.getattr(ctx, handle).await
@@ -324,8 +324,8 @@ impl FileSystem for FailPostMutationRootStatFs {
     fn limits(&self) -> embednfs::FsLimits {
         self.inner.limits()
     }
-    async fn statfs(&self, ctx: &RequestContext) -> FsResult<FsStats> {
-        self.inner.statfs(ctx).await
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
+        self.inner.statfs(ctx, handle).await
     }
     async fn getattr(&self, ctx: &RequestContext, id: &u64) -> FsResult<Attrs> {
         if *id == self.inner.root() {
@@ -442,8 +442,8 @@ impl FileSystem for FailFirstRootStatFs {
     fn limits(&self) -> embednfs::FsLimits {
         self.inner.limits()
     }
-    async fn statfs(&self, ctx: &RequestContext) -> FsResult<FsStats> {
-        self.inner.statfs(ctx).await
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
+        self.inner.statfs(ctx, handle).await
     }
     async fn getattr(&self, ctx: &RequestContext, id: &u64) -> FsResult<Attrs> {
         if *id == self.inner.root() && self.root_stat_calls.fetch_add(1, Ordering::Relaxed) == 0 {
@@ -557,8 +557,8 @@ impl FileSystem for ForcedWriteStabilityFs {
     fn limits(&self) -> embednfs::FsLimits {
         self.inner.limits()
     }
-    async fn statfs(&self, ctx: &RequestContext) -> FsResult<FsStats> {
-        self.inner.statfs(ctx).await
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
+        self.inner.statfs(ctx, handle).await
     }
     async fn getattr(&self, ctx: &RequestContext, id: &u64) -> FsResult<Attrs> {
         self.inner.getattr(ctx, id).await

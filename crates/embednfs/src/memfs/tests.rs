@@ -512,7 +512,7 @@ async fn statfs_saturates_when_usage_exceeds_advertised_capacity() {
         root.attrs.space_used = (1_u64 << 30) + 1;
     }
 
-    let stats = fs.statfs(&RequestContext::anonymous()).await.unwrap();
+    let stats = fs.statfs(&RequestContext::anonymous(), &1).await.unwrap();
     assert_eq!(stats.free_bytes, 0);
     assert_eq!(stats.avail_bytes, 0);
 }

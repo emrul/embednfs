@@ -70,7 +70,7 @@ pub trait FileSystem: Send + Sync + 'static {
     fn capabilities(&self) -> FsCapabilities;
     fn limits(&self) -> FsLimits;
 
-    async fn statfs(&self, ctx: &RequestContext) -> FsResult<FsStats>;
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats>;
     async fn getattr(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<Attrs>;
     async fn access(
         &self,

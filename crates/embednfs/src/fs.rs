@@ -193,6 +193,21 @@ impl Default for FsStats {
     }
 }
 
+/// Stable NFS filesystem identifier for an exported object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FsId {
+    /// Server-scoped major filesystem identifier.
+    pub major: u64,
+    /// Server-scoped minor filesystem identifier.
+    pub minor: u64,
+}
+
+impl Default for FsId {
+    fn default() -> Self {
+        Self { major: 1, minor: 1 }
+    }
+}
+
 /// Timestamp carried through exported attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timestamp {
@@ -229,6 +244,8 @@ pub enum SetTime {
 pub struct Attrs {
     /// Object type.
     pub object_type: ObjectType,
+    /// Stable NFS filesystem identifier for the filesystem holding this object.
+    pub fsid: FsId,
     /// Stable exported file identifier.
     pub fileid: u64,
     /// Change identifier for cookie verifiers and client cache invalidation.
@@ -269,6 +286,7 @@ impl Attrs {
         let now = Timestamp::now();
         Self {
             object_type,
+            fsid: FsId::default(),
             fileid,
             change: fileid.max(1),
             size: 0,
@@ -618,8 +636,8 @@ pub trait FileSystem: Send + Sync + 'static {
         FsLimits::default()
     }
 
-    /// Returns filesystem-wide space and object statistics.
-    async fn statfs(&self, ctx: &RequestContext) -> FsResult<FsStats>;
+    /// Returns filesystem space and object statistics for the filesystem holding `handle`.
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats>;
 
     /// Returns complete exported attributes for an object.
     async fn getattr(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<Attrs>;

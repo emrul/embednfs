@@ -15,12 +15,17 @@ impl<F: FileSystem> NfsServer<F> {
         request: &Bitmap4,
         fh: &NfsFh4,
     ) -> NfsResult<Fattr4> {
-        let stats = self.statfs(request_ctx).await?;
+        let object = self.state.fh_to_object(fh).ok_or(FsError::Stale)?;
+        let stats = if attrs::request_needs_fs_stats(request) {
+            Some(self.statfs_for_object(request_ctx, &object).await?)
+        } else {
+            None
+        };
         let limits = self.limits();
         let capabilities = self.capabilities();
         let ctx = attrs::AttrEncodingContext {
             limits: &limits,
-            stats: &stats,
+            stats: stats.as_ref(),
             capabilities: &capabilities,
         };
         Ok(attrs::encode_fattr4(attr, request, fh, &ctx))
@@ -31,8 +36,10 @@ impl<F: FileSystem> NfsServer<F> {
         file_type: ServerFileType,
         size: u64,
         has_named_attrs: bool,
+        parent_attrs: &Attrs,
     ) -> ServerFileAttr {
         ServerFileAttr {
+            fsid: parent_attrs.fsid,
             fileid: meta.fileid,
             file_type,
             size,
@@ -61,6 +68,7 @@ impl<F: FileSystem> NfsServer<F> {
 
     pub(super) fn attr_from_backend(&self, attrs: Attrs) -> ServerFileAttr {
         ServerFileAttr {
+            fsid: attrs.fsid,
             fileid: attrs.fileid,
             file_type: ServerFileType::from_attrs(&attrs),
             size: attrs.size,
@@ -111,6 +119,7 @@ impl<F: FileSystem> NfsServer<F> {
                         count
                     }
                 };
+                let parent_attrs = self.getattr(ctx, *parent).await?;
                 let meta = self
                     .state
                     .ensure_meta(object, ServerFileType::NamedAttrDir)
@@ -120,9 +129,11 @@ impl<F: FileSystem> NfsServer<F> {
                     ServerFileType::NamedAttrDir,
                     count,
                     false,
+                    &parent_attrs,
                 ))
             }
             ServerObject::NamedAttrFile { parent, name } => {
+                let parent_attrs = self.getattr(ctx, *parent).await?;
                 let parent_handle = self.resolve_backend_handle(*parent).await?;
                 let named = self.named_attrs().ok_or(FsError::Unsupported)?;
                 let value = named.get_xattr(ctx, &parent_handle, name).await?;
@@ -135,6 +146,7 @@ impl<F: FileSystem> NfsServer<F> {
                     ServerFileType::NamedAttr,
                     value.len() as u64,
                     false,
+                    &parent_attrs,
                 ))
             }
         }

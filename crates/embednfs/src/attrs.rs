@@ -9,11 +9,20 @@ use embednfs_proto::xdr::*;
 use embednfs_proto::*;
 const MODE_PERM_MASK: u32 = 0o7777;
 
-/// Snapshot of filesystem-wide values needed for attribute encoding.
+/// Snapshot of object and filesystem values needed for attribute encoding.
 pub(crate) struct AttrEncodingContext<'a> {
     pub limits: &'a FsLimits,
-    pub stats: &'a FsStats,
+    pub stats: Option<&'a FsStats>,
     pub capabilities: &'a FsCapabilities,
+}
+
+pub(crate) fn request_needs_fs_stats(request: &Bitmap4) -> bool {
+    request.is_set(FATTR4_FILES_AVAIL)
+        || request.is_set(FATTR4_FILES_FREE)
+        || request.is_set(FATTR4_FILES_TOTAL)
+        || request.is_set(FATTR4_SPACE_AVAIL)
+        || request.is_set(FATTR4_SPACE_FREE)
+        || request.is_set(FATTR4_SPACE_TOTAL)
 }
 
 pub(crate) fn supported_attrs_bitmap(capabilities: &FsCapabilities) -> Bitmap4 {
@@ -151,8 +160,10 @@ pub(crate) fn encode_fattr4(
     // FATTR4_FSID (8) - mandatory
     if request.is_set(FATTR4_FSID) {
         result_bitmap.set(FATTR4_FSID);
-        // Use a non-zero fsid; macOS uses this to identify the filesystem
-        let fsid = Fsid4 { major: 1, minor: 1 };
+        let fsid = Fsid4 {
+            major: attr.fsid.major,
+            minor: attr.fsid.minor,
+        };
         fsid.encode(&mut vals);
     }
 
@@ -224,21 +235,21 @@ pub(crate) fn encode_fattr4(
     }
 
     // FATTR4_FILES_AVAIL (21)
-    if request.is_set(FATTR4_FILES_AVAIL) {
+    if let Some(stats) = ctx.stats.filter(|_| request.is_set(FATTR4_FILES_AVAIL)) {
         result_bitmap.set(FATTR4_FILES_AVAIL);
-        ctx.stats.avail_files.encode(&mut vals);
+        stats.avail_files.encode(&mut vals);
     }
 
     // FATTR4_FILES_FREE (22)
-    if request.is_set(FATTR4_FILES_FREE) {
+    if let Some(stats) = ctx.stats.filter(|_| request.is_set(FATTR4_FILES_FREE)) {
         result_bitmap.set(FATTR4_FILES_FREE);
-        ctx.stats.free_files.encode(&mut vals);
+        stats.free_files.encode(&mut vals);
     }
 
     // FATTR4_FILES_TOTAL (23)
-    if request.is_set(FATTR4_FILES_TOTAL) {
+    if let Some(stats) = ctx.stats.filter(|_| request.is_set(FATTR4_FILES_TOTAL)) {
         result_bitmap.set(FATTR4_FILES_TOTAL);
-        ctx.stats.total_files.encode(&mut vals);
+        stats.total_files.encode(&mut vals);
     }
 
     // FATTR4_HIDDEN (25) - macOS UF_HIDDEN flag
@@ -326,21 +337,21 @@ pub(crate) fn encode_fattr4(
     }
 
     // FATTR4_SPACE_AVAIL (42)
-    if request.is_set(FATTR4_SPACE_AVAIL) {
+    if let Some(stats) = ctx.stats.filter(|_| request.is_set(FATTR4_SPACE_AVAIL)) {
         result_bitmap.set(FATTR4_SPACE_AVAIL);
-        ctx.stats.avail_bytes.encode(&mut vals);
+        stats.avail_bytes.encode(&mut vals);
     }
 
     // FATTR4_SPACE_FREE (43)
-    if request.is_set(FATTR4_SPACE_FREE) {
+    if let Some(stats) = ctx.stats.filter(|_| request.is_set(FATTR4_SPACE_FREE)) {
         result_bitmap.set(FATTR4_SPACE_FREE);
-        ctx.stats.free_bytes.encode(&mut vals);
+        stats.free_bytes.encode(&mut vals);
     }
 
     // FATTR4_SPACE_TOTAL (44)
-    if request.is_set(FATTR4_SPACE_TOTAL) {
+    if let Some(stats) = ctx.stats.filter(|_| request.is_set(FATTR4_SPACE_TOTAL)) {
         result_bitmap.set(FATTR4_SPACE_TOTAL);
-        ctx.stats.total_bytes.encode(&mut vals);
+        stats.total_bytes.encode(&mut vals);
     }
 
     // FATTR4_SPACE_USED (45)
@@ -592,6 +603,7 @@ mod tests {
         request.set(FATTR4_MODE);
 
         let attr = ServerFileAttr {
+            fsid: crate::fs::FsId::default(),
             fileid: 1,
             file_type: ServerFileType::Regular,
             size: 0,
@@ -622,7 +634,7 @@ mod tests {
         let caps = FsCapabilities::default();
         let ctx = AttrEncodingContext {
             limits: &limits,
-            stats: &stats,
+            stats: Some(&stats),
             capabilities: &caps,
         };
         let fattr = encode_fattr4(&attr, &request, &fh, &ctx);

@@ -408,17 +408,9 @@ impl<F: FileSystem> NfsServer<F> {
             return NfsResop4::Readdir(NfsStat4::Toosmall, None);
         }
 
-        let stats = match self.statfs(request_ctx).await {
-            Ok(stats) => stats,
-            Err(e) => return NfsResop4::Readdir(e.to_nfsstat4(), None),
-        };
         let limits = self.limits();
         let caps = self.capabilities();
-        let encode_ctx = attrs::AttrEncodingContext {
-            limits: &limits,
-            stats: &stats,
-            capabilities: &caps,
-        };
+        let needs_stats = attrs::request_needs_fs_stats(&args.attr_request);
 
         let mut result_entries = Vec::with_capacity(entries.len().min(64));
         let mut dir_bytes = 0usize;
@@ -434,6 +426,22 @@ impl<F: FileSystem> NfsServer<F> {
                         continue;
                     }
                 },
+            };
+            let stats = if needs_stats {
+                match self.statfs_for_object(request_ctx, object).await {
+                    Ok(stats) => Some(stats),
+                    Err(e) => {
+                        trace!("readdir: skipping entry {name:?}: {e:?}");
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let encode_ctx = attrs::AttrEncodingContext {
+                limits: &limits,
+                stats: stats.as_ref(),
+                capabilities: &caps,
             };
             let entry_fh = self.state.object_to_fh(object);
             let result_entry = Entry4 {
