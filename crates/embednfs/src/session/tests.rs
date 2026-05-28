@@ -566,7 +566,7 @@ async fn test_close_and_unlock_validate_stateid_seqids() {
         })
         .await
         .unwrap();
-    assert_eq!(closed.seqid, downgraded.seqid.wrapping_add(1));
+    assert_eq!(closed.stateid.seqid, downgraded.seqid.wrapping_add(1));
 
     let open_stateid = setup_open_state(&state, object.clone(), 31).await;
     let owner = StateOwner4 {

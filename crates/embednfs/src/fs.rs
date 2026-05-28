@@ -617,6 +617,28 @@ pub trait CommitSupport<H>: Send + Sync {
     ) -> FsResult<()>;
 }
 
+/// Optional OPEN/CLOSE lifecycle notifications.
+///
+/// NFSv4 OPEN/CLOSE are stateful operations the server tracks internally;
+/// a backend that needs to react to a file's open lifecycle implements
+/// this. The motivating case is a copy-on-write/publish backend that must
+/// flush a scratch copy when the last writer closes (the share-reservation
+/// equivalent of `close(2)` on the final write descriptor).
+#[async_trait]
+pub trait OpenLifecycle<H>: Send + Sync {
+    /// Called after a successful CLOSE. `last_writer` is true when this
+    /// close removed the object's final write-open — i.e. the closed open
+    /// held write access and no other active open for the same object
+    /// still does. A failure is logged by the server but does not fail the
+    /// CLOSE (the close already succeeded at the protocol level).
+    async fn on_close(
+        &self,
+        ctx: &RequestContext,
+        handle: &H,
+        last_writer: bool,
+    ) -> FsResult<()>;
+}
+
 /// Core filesystem trait implemented by embedders.
 #[async_trait]
 pub trait FileSystem: Send + Sync + 'static {
@@ -742,6 +764,11 @@ pub trait FileSystem: Send + Sync + 'static {
 
     /// Returns optional explicit commit support.
     fn commit_support(&self) -> Option<&dyn CommitSupport<Self::Handle>> {
+        None
+    }
+
+    /// Returns optional OPEN/CLOSE lifecycle notifications.
+    fn open_lifecycle(&self) -> Option<&dyn OpenLifecycle<Self::Handle>> {
         None
     }
 }

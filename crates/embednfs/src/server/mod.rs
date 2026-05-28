@@ -144,6 +144,10 @@ impl<F: FileSystem> NfsServer<F> {
         self.fs.commit_support()
     }
 
+    fn lifecycle(&self) -> Option<&dyn OpenLifecycle<F::Handle>> {
+        self.fs.open_lifecycle()
+    }
+
     fn fh_has_valid_format(fh: &NfsFh4) -> bool {
         fh.0.len() == std::mem::size_of::<u64>()
     }

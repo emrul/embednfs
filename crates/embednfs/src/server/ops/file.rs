@@ -125,6 +125,7 @@ impl<F: FileSystem> NfsServer<F> {
 
     pub(crate) async fn op_close(
         &self,
+        request_ctx: &RequestContext,
         args: &CloseArgs4,
         current_fh: &Option<NfsFh4>,
         current_stateid: Option<Stateid4>,
@@ -166,7 +167,27 @@ impl<F: FileSystem> NfsServer<F> {
         }
 
         match self.state.close_state(&stateid).await {
-            Ok(stateid) => NfsResop4::Close(NfsStat4::Ok, stateid),
+            Ok(outcome) => {
+                // Notify a publish/CoW backend when the last writer closes
+                // (the §7.1 publish-on-CLOSE trigger). The close itself has
+                // already succeeded; a hook failure is logged, not surfaced.
+                if outcome.last_writer
+                    && let Some(lifecycle) = self.lifecycle()
+                    && let ServerObject::Fs(id) = object
+                {
+                    match self.resolve_backend_handle(id).await {
+                        Ok(handle) => {
+                            if let Err(e) =
+                                lifecycle.on_close(request_ctx, &handle, true).await
+                            {
+                                warn!("OpenLifecycle::on_close failed: {e:?}");
+                            }
+                        }
+                        Err(e) => warn!("on_close handle resolution failed: {e:?}"),
+                    }
+                }
+                NfsResop4::Close(NfsStat4::Ok, outcome.stateid)
+            }
             Err(status) => NfsResop4::Close(status, Stateid4::default()),
         }
     }

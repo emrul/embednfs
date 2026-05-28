@@ -9,6 +9,15 @@ use crate::internal::ServerObject;
 use super::StateManager;
 use super::model::OpenFileState;
 
+/// Outcome of [`StateManager::close_state`].
+#[derive(Debug)]
+pub(crate) struct CloseOutcome {
+    /// The bumped open stateid to return to the client.
+    pub(crate) stateid: Stateid4,
+    /// True if this close removed the object's final write-open.
+    pub(crate) last_writer: bool,
+}
+
 impl StateManager {
     pub(crate) async fn has_conflicting_share_deny(
         &self,
@@ -107,15 +116,25 @@ impl StateManager {
     }
 
     /// Close an open state.
-    pub(crate) async fn close_state(&self, stateid: &Stateid4) -> Result<Stateid4, NfsStat4> {
+    ///
+    /// Reports whether this close removed the object's last write-open
+    /// (`last_writer`): the closed open held write access and no other
+    /// active open for the same object still does. The server uses that
+    /// to drive an [`crate::fs::OpenLifecycle::on_close`] notification.
+    pub(crate) async fn close_state(&self, stateid: &Stateid4) -> Result<CloseOutcome, NfsStat4> {
         self.reap_expired_clients().await;
         let mut inner = self.inner.write().await;
-        let (stored_seq, active) = {
+        let (stored_seq, active, object, was_writer) = {
             let state = inner
                 .open_files
                 .get(&stateid.other)
                 .ok_or(NfsStat4::BadStateid)?;
-            (state.stateid_seq, state.active)
+            (
+                state.stateid_seq,
+                state.active,
+                state.object.clone(),
+                (state.share_access & OPEN4_SHARE_ACCESS_WRITE) != 0,
+            )
         };
         Self::validate_stateid_seq(stored_seq, stateid.seqid)?;
         if !active {
@@ -128,15 +147,27 @@ impl StateManager {
         {
             return Err(NfsStat4::LocksHeld);
         }
-        let state = inner
-            .open_files
-            .get_mut(&stateid.other)
-            .ok_or(NfsStat4::BadStateid)?;
-        state.active = false;
-        state.stateid_seq = stored_seq.wrapping_add(1);
-        Ok(Stateid4 {
-            seqid: state.stateid_seq,
-            other: stateid.other,
+        let new_seqid = {
+            let state = inner
+                .open_files
+                .get_mut(&stateid.other)
+                .ok_or(NfsStat4::BadStateid)?;
+            state.active = false;
+            state.stateid_seq = stored_seq.wrapping_add(1);
+            state.stateid_seq
+        };
+        // After deactivating this open, is any active write-open left for
+        // the same object? If not, and this close was itself a writer,
+        // this was the last writer.
+        let writers_remain = inner.open_files.values().any(|s| {
+            s.active && s.object == object && (s.share_access & OPEN4_SHARE_ACCESS_WRITE) != 0
+        });
+        Ok(CloseOutcome {
+            stateid: Stateid4 {
+                seqid: new_seqid,
+                other: stateid.other,
+            },
+            last_writer: was_writer && !writers_remain,
         })
     }
 
