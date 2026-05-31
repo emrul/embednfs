@@ -626,17 +626,28 @@ pub trait CommitSupport<H>: Send + Sync {
 /// equivalent of `close(2)` on the final write descriptor).
 #[async_trait]
 pub trait OpenLifecycle<H>: Send + Sync {
+    /// Called after a successful OPEN that granted write share-access.
+    /// `write_access` is true in that case. A backend that must observe a
+    /// file's pre-edit state — e.g. a publish backend capturing a causal base
+    /// version *before* any (NFS-buffered) WRITE lands, so a remote winner
+    /// arriving mid-edit can be detected at CLOSE instead of silently
+    /// clobbered — records it here. Defaults to a no-op. A failure is logged
+    /// by the server but does not fail the OPEN.
+    async fn on_open(
+        &self,
+        _ctx: &RequestContext,
+        _handle: &H,
+        _write_access: bool,
+    ) -> FsResult<()> {
+        Ok(())
+    }
+
     /// Called after a successful CLOSE. `last_writer` is true when this
     /// close removed the object's final write-open — i.e. the closed open
     /// held write access and no other active open for the same object
     /// still does. A failure is logged by the server but does not fail the
     /// CLOSE (the close already succeeded at the protocol level).
-    async fn on_close(
-        &self,
-        ctx: &RequestContext,
-        handle: &H,
-        last_writer: bool,
-    ) -> FsResult<()>;
+    async fn on_close(&self, ctx: &RequestContext, handle: &H, last_writer: bool) -> FsResult<()>;
 }
 
 /// Core filesystem trait implemented by embedders.

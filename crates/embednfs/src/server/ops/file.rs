@@ -177,9 +177,7 @@ impl<F: FileSystem> NfsServer<F> {
                 {
                     match self.resolve_backend_handle(id).await {
                         Ok(handle) => {
-                            if let Err(e) =
-                                lifecycle.on_close(request_ctx, &handle, true).await
-                            {
+                            if let Err(e) = lifecycle.on_close(request_ctx, &handle, true).await {
                                 warn!("OpenLifecycle::on_close failed: {e:?}");
                             }
                         }
@@ -447,6 +445,26 @@ impl<F: FileSystem> NfsServer<F> {
                 after: change,
             }
         };
+
+        // Notify a publish/CoW backend of a write-OPEN so it can capture the
+        // file's pre-edit causal base before any (client-buffered) WRITE lands
+        // — the §9.1 mid-edit guard. The open already succeeded; a hook failure
+        // is logged, not surfaced.
+        let write_access =
+            (self.state.share_access_mode(args.share_access) & OPEN4_SHARE_ACCESS_WRITE) != 0;
+        if write_access
+            && let Some(lifecycle) = self.lifecycle()
+            && let ServerObject::Fs(id) = &object
+        {
+            match self.resolve_backend_handle(*id).await {
+                Ok(handle) => {
+                    if let Err(e) = lifecycle.on_open(request_ctx, &handle, true).await {
+                        warn!("OpenLifecycle::on_open failed: {e:?}");
+                    }
+                }
+                Err(e) => warn!("on_open handle resolution failed: {e:?}"),
+            }
+        }
 
         // NFSv4.0 clients require OPEN_CONFIRM after an initial OPEN; tell
         // them to do that by setting OPEN4_RESULT_CONFIRM. NFSv4.1+ clients
