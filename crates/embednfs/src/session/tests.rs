@@ -11,6 +11,7 @@ use embednfs_proto::{
 
 use crate::internal::ServerObject;
 
+use super::model::{DelegationKind, DelegationStatus};
 use super::{StateConfig, StateManager};
 
 #[derive(Clone)]
@@ -179,6 +180,192 @@ async fn test_test_stateids_checks_nonzero_seqids() {
             NfsStat4::Ok,
             NfsStat4::BadStateid,
         ]
+    );
+}
+
+#[tokio::test]
+async fn test_directory_delegation_stateid_reuses_and_returns() {
+    let state = StateManager::new();
+    let object = ServerObject::Fs(44);
+    let sessionid = [0x44; 16];
+    let stateid = state
+        .create_directory_delegation(object.clone(), 41, Some(sessionid))
+        .await
+        .unwrap();
+
+    let repeated = state
+        .create_directory_delegation(object.clone(), 41, Some(sessionid))
+        .await
+        .unwrap();
+    assert_eq!(repeated, stateid);
+
+    {
+        let inner = state.inner.read().await;
+        let delegation = inner.delegations.get(&stateid.other).unwrap();
+        assert_eq!(delegation.object, object);
+        assert_eq!(delegation.clientid, 41);
+        assert_eq!(delegation.sessionid, Some(sessionid));
+        assert_eq!(delegation.kind, DelegationKind::DirectoryRead);
+        assert_eq!(delegation.status, DelegationStatus::Granted);
+        let _granted_at = delegation.granted_at;
+        assert!(delegation.last_recall_at.is_none());
+        assert!(
+            inner
+                .dir_delegations
+                .get(&object)
+                .unwrap()
+                .contains(&stateid.other)
+        );
+        assert!(
+            inner
+                .client_delegations
+                .get(&41)
+                .unwrap()
+                .contains(&stateid.other)
+        );
+    }
+
+    assert_eq!(
+        state.test_stateids(&[stateid], None).await,
+        vec![NfsStat4::Ok]
+    );
+    state
+        .return_delegation_state(&stateid, Some(41))
+        .await
+        .unwrap();
+
+    let inner = state.inner.read().await;
+    assert!(!inner.delegations.contains_key(&stateid.other));
+    assert!(!inner.dir_delegations.contains_key(&object));
+    assert!(!inner.client_delegations.contains_key(&41));
+    drop(inner);
+    assert_eq!(
+        state.test_stateids(&[stateid], None).await,
+        vec![NfsStat4::BadStateid]
+    );
+}
+
+#[tokio::test]
+async fn test_delegation_return_validates_owner_and_seqid() {
+    let state = StateManager::new();
+    let stateid = state
+        .create_directory_delegation(ServerObject::Fs(45), 51, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state
+            .return_delegation_state(&stateid, Some(52))
+            .await
+            .unwrap_err(),
+        NfsStat4::BadStateid
+    );
+    assert_eq!(
+        state
+            .return_delegation_state(
+                &Stateid4 {
+                    seqid: stateid.seqid.wrapping_add(1),
+                    other: stateid.other,
+                },
+                Some(51),
+            )
+            .await
+            .unwrap_err(),
+        NfsStat4::BadStateid
+    );
+
+    state
+        .return_delegation_state(
+            &Stateid4 {
+                seqid: 0,
+                other: stateid.other,
+            },
+            Some(51),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_free_stateid_requires_revoked_delegation() {
+    let state = StateManager::new();
+    let stateid = state
+        .create_directory_delegation(ServerObject::Fs(46), 61, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state.free_stateid(&stateid).await.unwrap_err(),
+        NfsStat4::LocksHeld
+    );
+
+    state.revoke_delegation_state(&stateid).await.unwrap();
+    assert_eq!(
+        state.test_stateids(&[stateid], None).await,
+        vec![NfsStat4::DelegRevoked]
+    );
+    assert_eq!(
+        state
+            .return_delegation_state(&stateid, Some(61))
+            .await
+            .unwrap_err(),
+        NfsStat4::DelegRevoked
+    );
+
+    state.free_stateid(&stateid).await.unwrap();
+    assert_eq!(
+        state.test_stateids(&[stateid], None).await,
+        vec![NfsStat4::BadStateid]
+    );
+}
+
+#[tokio::test]
+async fn test_purge_and_expiry_remove_client_delegations() {
+    let state = StateManager::new();
+    let client_one_first = state
+        .create_directory_delegation(ServerObject::Fs(47), 71, None)
+        .await
+        .unwrap();
+    let client_one_second = state
+        .create_directory_delegation(ServerObject::Fs(48), 71, None)
+        .await
+        .unwrap();
+    let client_two = state
+        .create_directory_delegation(ServerObject::Fs(49), 72, None)
+        .await
+        .unwrap();
+
+    state.purge_client_delegations(71).await;
+
+    assert_eq!(
+        state
+            .test_stateids(&[client_one_first, client_one_second, client_two], None)
+            .await,
+        vec![NfsStat4::BadStateid, NfsStat4::BadStateid, NfsStat4::Ok]
+    );
+
+    let (expiring_state, clock) = state_with_lease(Duration::from_secs(1));
+    let client = expiring_state
+        .exchange_id(&exchange_id_args(b"deleg-owner", [0x33; 8]))
+        .await
+        .unwrap();
+    let _ = expiring_state
+        .create_session(&create_session_args(client.clientid, client.sequenceid), 1)
+        .await
+        .unwrap();
+    let expired_delegation = expiring_state
+        .create_directory_delegation(ServerObject::Fs(50), client.clientid, None)
+        .await
+        .unwrap();
+
+    clock.advance(Duration::from_secs(2));
+    expiring_state.reap_expired_clients().await;
+
+    assert_eq!(
+        expiring_state
+            .test_stateids(&[expired_delegation], None)
+            .await,
+        vec![NfsStat4::BadStateid]
     );
 }
 

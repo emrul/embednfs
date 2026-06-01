@@ -10,6 +10,17 @@ pub async fn start_server() -> u16 {
 
 pub async fn start_server_with_fs<F: FileSystem>(fs: F) -> u16 {
     let server = NfsServer::new(fs);
+    start_server_instance(server).await
+}
+
+pub async fn start_server_with_directory_delegations() -> u16 {
+    let server = NfsServer::builder(MemFs::new())
+        .directory_delegations(true)
+        .build();
+    start_server_instance(server).await
+}
+
+async fn start_server_instance<F: FileSystem>(server: NfsServer<F>) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 

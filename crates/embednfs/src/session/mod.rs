@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use crate::internal::ServerObject;
 
 mod clients;
+mod delegations;
 mod filehandles;
 mod locks;
 mod metadata;
@@ -106,6 +107,9 @@ impl StateManager {
                 sessions: HashMap::new(),
                 open_files: HashMap::new(),
                 lock_files: HashMap::new(),
+                delegations: HashMap::new(),
+                dir_delegations: HashMap::new(),
+                client_delegations: HashMap::new(),
                 metadata: HashMap::new(),
             })),
             fh_to_object: DashMap::new(),

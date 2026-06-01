@@ -73,11 +73,50 @@ pub(crate) enum ResolvedStateid {
     Lock(ResolvedLockState),
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "grant, callback, and recall phases will consume all delegation state fields"
+    )
+)]
+#[derive(Debug)]
+pub(super) struct DelegationState {
+    pub object: ServerObject,
+    pub clientid: Clientid4,
+    pub sessionid: Option<Sessionid4>,
+    pub stateid_seq: u32,
+    pub kind: DelegationKind,
+    pub status: DelegationStatus,
+    pub granted_at: Instant,
+    pub last_recall_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DelegationKind {
+    DirectoryRead,
+}
+
+#[expect(
+    dead_code,
+    reason = "recall and revocation phases will construct every delegation status"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DelegationStatus {
+    Granted,
+    RecallInProgress,
+    Returned,
+    Revoked,
+}
+
 pub(super) struct StateInner {
     pub clients: HashMap<Clientid4, ClientState>,
     pub sessions: HashMap<Sessionid4, SessionState>,
     pub open_files: HashMap<[u8; 12], OpenFileState>,
     pub lock_files: HashMap<[u8; 12], LockFileState>,
+    pub delegations: HashMap<[u8; 12], DelegationState>,
+    pub dir_delegations: HashMap<ServerObject, HashSet<[u8; 12]>>,
+    pub client_delegations: HashMap<Clientid4, HashSet<[u8; 12]>>,
     pub metadata: HashMap<ServerObject, SynthMeta>,
 }
 

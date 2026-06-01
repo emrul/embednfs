@@ -6,6 +6,7 @@ use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -56,12 +57,25 @@ impl IdMapper for NumericIdMapper {
 pub struct NfsServerBuilder<F: FileSystem> {
     fs: F,
     id_mapper: Arc<dyn IdMapper>,
+    delegation_config: DelegationConfig,
 }
 
 impl<F: FileSystem> NfsServerBuilder<F> {
     /// Replaces the uid/gid string mapper used for `owner` attributes.
     pub fn id_mapper<M: IdMapper>(mut self, mapper: M) -> Self {
         self.id_mapper = Arc::new(mapper);
+        self
+    }
+
+    /// Enables or disables NFSv4.1 directory delegations.
+    pub fn directory_delegations(mut self, enabled: bool) -> Self {
+        self.delegation_config.directory_delegations = enabled;
+        self
+    }
+
+    /// Replaces the delegation configuration.
+    pub fn delegation_config(mut self, config: DelegationConfig) -> Self {
+        self.delegation_config = config;
         self
     }
 
@@ -74,6 +88,31 @@ impl<F: FileSystem> NfsServerBuilder<F> {
             object_to_handle: Arc::new(RwLock::new(HashMap::new())),
             next_object_id: AtomicU64::new(1),
             id_mapper: self.id_mapper,
+            delegation_config: self.delegation_config,
+        }
+    }
+}
+
+/// Configuration for NFSv4 delegation behavior.
+#[derive(Debug, Clone)]
+pub struct DelegationConfig {
+    /// Enables read-only directory delegations on NFSv4.1+ sessions.
+    pub directory_delegations: bool,
+    /// Maximum time to wait for a recalled delegation to be returned.
+    pub recall_timeout: Duration,
+    /// Maximum number of delegations one client may hold.
+    pub max_delegations_per_client: usize,
+    /// Maximum number of delegations the server may hold in total.
+    pub max_delegations_total: usize,
+}
+
+impl Default for DelegationConfig {
+    fn default() -> Self {
+        Self {
+            directory_delegations: false,
+            recall_timeout: Duration::from_secs(5),
+            max_delegations_per_client: 1024,
+            max_delegations_total: 16_384,
         }
     }
 }
@@ -86,6 +125,7 @@ pub struct NfsServer<F: FileSystem> {
     object_to_handle: Arc<RwLock<HashMap<ObjectId, F::Handle>>>,
     next_object_id: AtomicU64,
     id_mapper: Arc<dyn IdMapper>,
+    delegation_config: DelegationConfig,
 }
 
 impl<F: FileSystem> NfsServer<F> {
@@ -94,6 +134,7 @@ impl<F: FileSystem> NfsServer<F> {
         NfsServerBuilder {
             fs,
             id_mapper: Arc::new(NumericIdMapper),
+            delegation_config: DelegationConfig::default(),
         }
     }
 

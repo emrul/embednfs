@@ -378,6 +378,32 @@ async fn test_delegreturn_stub_succeeds() {
     assert_eq!(op_status, NfsStat4::Ok as u32);
 }
 
+/// DELEGRETURN rejects an unknown stateid when directory delegations are enabled.
+/// Origin: `design/delegations.md` Phase 1 state-aware delegation operations.
+/// RFC: RFC 8881 §18.6 and §18.48.
+#[tokio::test]
+async fn test_delegreturn_strict_mode_rejects_unknown_stateid() {
+    let port = start_server_with_directory_delegations().await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let deleg_op = encode_delegreturn(&Stateid4 {
+        seqid: 1,
+        other: [0x77; 12],
+    });
+    let compound = encode_compound("delegreturn-strict", &[&seq_op, &deleg_op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::BadStateid as u32);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_DELEGRETURN);
+    assert_eq!(op_status, NfsStat4::BadStateid as u32);
+}
+
 /// DELEGPURGE succeeds in the current stubbed implementation.
 /// Origin: implementation-specific stub behavior.
 /// RFC: RFC 8881 §18.5.

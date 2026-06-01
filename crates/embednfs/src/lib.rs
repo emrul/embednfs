@@ -18,4 +18,4 @@ pub use fs::{
     Timestamp, WriteResult, WriteStability, XattrSetMode, Xattrs,
 };
 pub use memfs::MemFs;
-pub use server::{IdMapper, NfsServer, NfsServerBuilder, NumericIdMapper};
+pub use server::{DelegationConfig, IdMapper, NfsServer, NfsServerBuilder, NumericIdMapper};

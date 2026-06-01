@@ -370,6 +370,7 @@ impl StateManager {
         inner
             .lock_files
             .retain(|_, state| state.owner.clientid != clientid);
+        Self::remove_client_delegations_locked(inner, clientid);
     }
 
     pub(super) fn drop_client_state(inner: &mut StateInner, clientid: Clientid4) -> bool {
@@ -521,5 +522,6 @@ impl StateManager {
                 .lock_files
                 .values()
                 .any(|state| state.owner.clientid == clientid)
+            || Self::has_live_client_delegations(inner, clientid)
     }
 }

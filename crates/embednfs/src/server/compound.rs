@@ -360,7 +360,31 @@ impl<F: FileSystem> NfsServer<F> {
                     .await;
                 NfsResop4::TestStateid(NfsStat4::Ok, results)
             }
-            NfsArgop4::DelegReturn(_) => NfsResop4::DelegReturn(NfsStat4::Ok),
+            NfsArgop4::DelegReturn(args) => {
+                if self.delegation_state_ops_enabled(state.minorversion) {
+                    let stateid = match self.state.normalize_stateid(
+                        &args.stateid,
+                        state.current_stateid,
+                        CurrentStateidMode::ZeroSeqid,
+                    ) {
+                        Ok(NormalizedStateid::Concrete(stateid)) => stateid,
+                        Ok(NormalizedStateid::Anonymous | NormalizedStateid::Bypass) => {
+                            return NfsResop4::DelegReturn(NfsStat4::BadStateid);
+                        }
+                        Err(status) => return NfsResop4::DelegReturn(status),
+                    };
+                    match self
+                        .state
+                        .return_delegation_state(&stateid, sequence_clientid)
+                        .await
+                    {
+                        Ok(()) => NfsResop4::DelegReturn(NfsStat4::Ok),
+                        Err(status) => NfsResop4::DelegReturn(status),
+                    }
+                } else {
+                    NfsResop4::DelegReturn(NfsStat4::Ok)
+                }
+            }
             NfsArgop4::OpenConfirm(args) => {
                 if state.minorversion != 0 {
                     NfsResop4::OpenConfirm(NfsStat4::Notsupp, None)
@@ -438,7 +462,14 @@ impl<F: FileSystem> NfsServer<F> {
                 self.op_openattr(request_ctx, args, &mut state.current_fh)
                     .await
             }
-            NfsArgop4::DelegPurge => NfsResop4::DelegPurge(NfsStat4::Ok),
+            NfsArgop4::DelegPurge => {
+                if self.delegation_state_ops_enabled(state.minorversion)
+                    && let Some(clientid) = sequence_clientid
+                {
+                    self.state.purge_client_delegations(clientid).await;
+                }
+                NfsResop4::DelegPurge(NfsStat4::Ok)
+            }
             NfsArgop4::Verify(vattr) => {
                 self.op_verify(request_ctx, vattr, &state.current_fh, false)
                     .await
@@ -477,6 +508,12 @@ impl<F: FileSystem> NfsServer<F> {
             NfsArgop4::Unsupported(opnum) => NfsResop4::Unsupported(*opnum, NfsStat4::Notsupp),
             NfsArgop4::Illegal => NfsResop4::Illegal(NfsStat4::OpIllegal),
         }
+    }
+}
+
+impl<F: FileSystem> NfsServer<F> {
+    fn delegation_state_ops_enabled(&self, minorversion: u32) -> bool {
+        minorversion != 0 && self.delegation_config.directory_delegations
     }
 }
 

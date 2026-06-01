@@ -199,6 +199,17 @@ impl StateManager {
             let _ = inner.lock_files.remove(&stateid.other);
             return Ok(());
         }
+        if let Some(delegation) = inner.delegations.get(&stateid.other) {
+            Self::validate_stateid_seq(delegation.stateid_seq, stateid.seqid)?;
+            if !matches!(
+                delegation.status,
+                super::model::DelegationStatus::Revoked | super::model::DelegationStatus::Returned
+            ) {
+                return Err(NfsStat4::LocksHeld);
+            }
+            let _ = Self::remove_delegation_locked(&mut inner, stateid.other);
+            return Ok(());
+        }
         Err(NfsStat4::BadStateid)
     }
 
@@ -232,6 +243,8 @@ impl StateManager {
                         Ok(()) => NfsStat4::Ok,
                         Err(status) => status,
                     }
+                } else if let Some(state) = inner.delegations.get(&stateid.other) {
+                    Self::delegation_test_status(state, stateid)
                 } else {
                     NfsStat4::BadStateid
                 }
