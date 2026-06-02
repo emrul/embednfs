@@ -7,6 +7,7 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-/tmp/embednfs-linux-smoke-${RUN_ID}}"
 BACKING_DIR="${BACKING_DIR:-${ARTIFACT_DIR}/backing}"
 MOUNT_DIR="${MOUNT_DIR:-${ARTIFACT_DIR}/mnt}"
 SERVER_LOG="${SERVER_LOG:-${ARTIFACT_DIR}/server.log}"
+SERVER_PID_FILE="${SERVER_PID_FILE:-${ARTIFACT_DIR}/server.pid}"
 SUMMARY_FILE="${SUMMARY_FILE:-${ARTIFACT_DIR}/summary.tsv}"
 SERVER_PORT="${SERVER_PORT:-12049}"
 SERVER_ADDR="${SERVER_ADDR:-127.0.0.1:${SERVER_PORT}}"
@@ -56,15 +57,40 @@ cleanup() {
     log "Unmounting ${MOUNT_DIR}"
     "${SUDO}" umount "${MOUNT_DIR}" >>"${ARTIFACT_DIR}/cleanup.log" 2>&1 || true
   fi
-  if [[ -n "${SERVER_PID}" ]]; then
-    log "Stopping server pid ${SERVER_PID}"
-    kill "${SERVER_PID}" >>"${ARTIFACT_DIR}/cleanup.log" 2>&1 || true
-    wait "${SERVER_PID}" >>"${ARTIFACT_DIR}/cleanup.log" 2>&1 || true
-  fi
+  stop_server
   if command -v dmesg >/dev/null 2>&1; then
     mkdir -p "${ARTIFACT_DIR}" >/dev/null 2>&1 || true
     dmesg >"${ARTIFACT_DIR}/dmesg-final.log" 2>/dev/null || true
   fi
+}
+
+stop_server() {
+  local pids=()
+  if [[ -n "${SERVER_PID}" ]]; then
+    pids+=("${SERVER_PID}")
+  fi
+  if [[ -s "${SERVER_PID_FILE}" ]]; then
+    local file_pid
+    file_pid="$(cat "${SERVER_PID_FILE}" 2>/dev/null || true)"
+    if [[ -n "${file_pid}" ]]; then
+      pids+=("${file_pid}")
+    fi
+  fi
+
+  local pid
+  local stopped=()
+  for pid in "${pids[@]}"; do
+    if [[ " ${stopped[*]} " == *" ${pid} "* ]]; then
+      continue
+    fi
+    stopped+=("${pid}")
+    if kill -0 "${pid}" >/dev/null 2>&1; then
+      log "Stopping server pid ${pid}"
+      kill "${pid}" >>"${ARTIFACT_DIR}/cleanup.log" 2>&1 || true
+      wait "${pid}" >>"${ARTIFACT_DIR}/cleanup.log" 2>&1 || true
+    fi
+  done
+  rm -f "${SERVER_PID_FILE}" >/dev/null 2>&1 || true
 }
 
 run_step() {
@@ -186,6 +212,7 @@ start_server() {
       bash -lc "${SERVER_CMD}"
   ) >>"${SERVER_LOG}" 2>&1 &
   SERVER_PID=$!
+  printf '%s\n' "${SERVER_PID}" >"${SERVER_PID_FILE}"
 }
 
 count_server_log() {
