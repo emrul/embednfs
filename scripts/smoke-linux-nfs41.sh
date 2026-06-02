@@ -400,6 +400,56 @@ wait_for_path_state() {
   done
 }
 
+wait_for_metric_increase() {
+  local metric="$1"
+  local before="$2"
+  local reason="$3"
+  local timeout_ms="$4"
+  local start_ms
+  local now
+  local count
+  start_ms="$(now_ms)"
+  while true; do
+    count="$(count_metric "${metric}")"
+    if (( count > before )); then
+      printf '%s\n' "${count}"
+      return 0
+    fi
+    now="$(now_ms)"
+    if (( now - start_ms >= timeout_ms )); then
+      echo "product gate failed: metric ${metric} did not increase for ${reason}; before=${before} current=${count}" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+}
+
+prime_directory_delegation() {
+  local before="$1"
+  local reason="$2"
+  local count
+  for _ in $(seq 1 20); do
+    ls -la "${MOUNT_DIR}" >/dev/null
+    stat "${MOUNT_DIR}" >/dev/null
+    count="$(count_metric 'get_dir_delegation_ok')"
+    if (( count > before )); then
+      printf '%s\n' "${count}"
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "product gate failed: client did not reacquire directory delegation for ${reason}; before=${before} current=${count}" >&2
+  return 1
+}
+
+run_external_recall_expect_callback() {
+  local reason="$1"
+  local before
+  before="$(count_metric 'cb_recall_sent')"
+  run_external_recall "${reason}"
+  wait_for_metric_increase 'cb_recall_sent' "${before}" "${reason}" 1000 >/dev/null
+}
+
 probe_delegation_product_behavior() {
   local lookup_before
   local getattr_before
@@ -413,6 +463,8 @@ probe_delegation_product_behavior() {
   local create_ms
   local unlink_ms
   local rename_ms
+  local rename_absent_ms
+  local delegation_ok_count
 
   lookup_before="$(count_server_log 'COMPOUND:.*"LOOKUP"')"
   getattr_before="$(count_server_log 'COMPOUND:.*"GETATTR"')"
@@ -426,30 +478,39 @@ probe_delegation_product_behavior() {
 
   lookup_after="$(count_server_log 'COMPOUND:.*"LOOKUP"')"
   getattr_after="$(count_server_log 'COMPOUND:.*"GETATTR"')"
+  delegation_ok_count="$(count_metric 'get_dir_delegation_ok')"
+  if (( delegation_ok_count == 0 )); then
+    echo "product gate failed: client has not acquired a directory delegation"
+    return 1
+  fi
 
-  run_external_recall "before external create"
+  run_external_recall_expect_callback "before external create"
   printf 'external\n' >"${BACKING_DIR}/${create_name}"
   create_ms="$(wait_for_path_state "${MOUNT_DIR}/${create_name}" present "${VISIBILITY_TIMEOUT_MS}")"
   test -f "${MOUNT_DIR}/${create_name}"
+  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "after external create")"
 
-  run_external_recall "before external unlink setup create"
-  printf 'external\n' >"${BACKING_DIR}/${unlink_name}"
-  wait_for_path_state "${MOUNT_DIR}/${unlink_name}" present "${VISIBILITY_TIMEOUT_MS}" >/dev/null
+  printf 'external\n' >"${MOUNT_DIR}/${unlink_name}"
   test -f "${MOUNT_DIR}/${unlink_name}"
-  run_external_recall "before external unlink"
+  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "before external unlink")"
+  run_external_recall_expect_callback "before external unlink"
   rm "${BACKING_DIR}/${unlink_name}"
   unlink_ms="$(wait_for_path_state "${MOUNT_DIR}/${unlink_name}" absent "${VISIBILITY_TIMEOUT_MS}")"
   test ! -e "${MOUNT_DIR}/${unlink_name}"
+  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "after external unlink")"
 
-  run_external_recall "before external rename setup create"
-  printf 'external\n' >"${BACKING_DIR}/${rename_from}"
-  wait_for_path_state "${MOUNT_DIR}/${rename_from}" present "${VISIBILITY_TIMEOUT_MS}" >/dev/null
+  printf 'external\n' >"${MOUNT_DIR}/${rename_from}"
   test -f "${MOUNT_DIR}/${rename_from}"
-  run_external_recall "before external rename"
+  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "before external rename")"
+  run_external_recall_expect_callback "before external rename"
   mv "${BACKING_DIR}/${rename_from}" "${BACKING_DIR}/${rename_to}"
   rename_ms="$(wait_for_path_state "${MOUNT_DIR}/${rename_to}" present "${VISIBILITY_TIMEOUT_MS}")"
   test -f "${MOUNT_DIR}/${rename_to}"
+  rename_absent_ms="$(wait_for_path_state "${MOUNT_DIR}/${rename_from}" absent "${VISIBILITY_TIMEOUT_MS}")"
   test ! -e "${MOUNT_DIR}/${rename_from}"
+  if (( rename_absent_ms > rename_ms )); then
+    rename_ms="${rename_absent_ms}"
+  fi
 
   mkdir "${MOUNT_DIR}/client-deleg-dir"
   printf 'client\n' >"${MOUNT_DIR}/client-deleg-dir/file.txt"
@@ -464,6 +525,7 @@ probe_delegation_product_behavior() {
     printf 'external_create_visibility_ms=%s\n' "${create_ms}"
     printf 'external_unlink_visibility_ms=%s\n' "${unlink_ms}"
     printf 'external_rename_visibility_ms=%s\n' "${rename_ms}"
+    printf 'external_rename_absent_visibility_ms=%s\n' "${rename_absent_ms}"
     printf 'visibility_target_ms=%s\n' "${VISIBILITY_TARGET_MS}"
     printf 'visibility_timeout_ms=%s\n' "${VISIBILITY_TIMEOUT_MS}"
   }
@@ -690,6 +752,9 @@ timeout "${MOUNT_TIMEOUT}" "${SUDO}" mount -t nfs4 -o "${MOUNT_OPTS}" 127.0.0.1:
 MOUNT_ACTIVE=1
 
 run_step "mount-metadata" probe_mount_metadata
+if [[ "${PRODUCT_BEHAVIOR}" == "1" ]]; then
+  run_step "delegation-product-behavior" probe_delegation_product_behavior
+fi
 run_step "basic-io" probe_basic_io
 run_step "large-io" probe_large_io
 run_step "metadata" probe_metadata
@@ -707,9 +772,6 @@ else
 fi
 
 run_step "server-restart-recovery" probe_recovery_restart
-if [[ "${PRODUCT_BEHAVIOR}" == "1" ]]; then
-  run_step "delegation-product-behavior" probe_delegation_product_behavior
-fi
 run_step "delegation-trace" probe_delegation_trace
 
 log "Summary"

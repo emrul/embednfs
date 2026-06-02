@@ -133,10 +133,55 @@ max_session_slots=64
 send_implementation_id=1
 ```
 
-This proves that enabling `DelegationConfig::directory_delegations` does not
-regress this Linux v4.1 smoke workflow. It does not prove that the Linux kernel
-accepts or uses granted directory delegations, because this host never requested
-one.
+Validation on the local Lima `podman` VM found a newer Fedora kernel client that
+does request directory delegations:
+
+```bash
+limactl shell podman bash -lc '
+  cd /Users/emrul/dev/github/emrul/embednfs &&
+  ARTIFACT_DIR=/tmp/embednfs-lima-gate-strict-after-product-harness \
+  SERVER_CARGO_TARGET_DIR=/tmp/embednfs-lima-target \
+  DIRECTORY_DELEGATIONS=1 \
+  REQUIRE_DELEGATIONS=1 \
+  RECALL_TIMEOUT_MS=1000 \
+  ./scripts/smoke-linux-nfs41.sh
+'
+```
+
+That strict protocol gate passed on kernel `7.0.9-105.fc43.aarch64` with:
+
+```text
+create_session_backchannel_ok=2
+get_dir_delegation_seen=2
+get_dir_delegation_ok=2
+cb_recall_sent=2
+cb_recall_ok=2
+delegreturn_seen=2
+recall_wait_ms_p50=0
+recall_wait_ms_p95=12
+recall_timeout_count=0
+revocation_count=0
+```
+
+The product-behavior gate is not yet passing on the same Lima client. The
+tightened probe verifies that each external mutation has a held delegation and
+that `RECALL /` actually sends `CB_RECALL`. After the first external create, the
+client did not reacquire a directory delegation for the next external unlink
+scenario:
+
+```text
+product gate failed: client did not reacquire directory delegation for before external unlink; before=2 current=2
+```
+
+Before adding the reacquisition assertion, the measured visibility counters were
+`create_ms=1`, `unlink_ms=3015`, and `rename_ms=2997` against a
+`VISIBILITY_TARGET_MS=1000` target.
+
+The remote `6.17.0-14-generic` result proves only that enabling
+`DelegationConfig::directory_delegations` does not regress that Linux v4.1 smoke
+workflow. The Lima `7.0.9-105.fc43.aarch64` result proves real kernel-client
+protocol interop for `GET_DIR_DELEGATION`, grant, `CB_RECALL`, and
+`DELEGRETURN`, but not the product latency target.
 
 ## Likely Breakage Points
 
