@@ -252,6 +252,42 @@ async fn test_bind_conn_to_session_backchannel_direction() {
     assert!(!rdma);
 }
 
+/// A backchannel-only connection cannot become a forechannel by sending SEQUENCE.
+/// Origin: RFC 8881 §18.34.3 channel direction binding.
+/// RFC: RFC 8881 §§18.34.3, 18.46.3.
+#[tokio::test]
+async fn test_backchannel_only_connection_rejects_forechannel_sequence() {
+    let port = start_server().await;
+    let mut fore_stream = connect(port).await;
+    let sessionid = setup_session_with_callback(&mut fore_stream, 0x4000_2001).await;
+    let mut back_stream = connect(port).await;
+
+    let bind_op = encode_bind_conn_to_session(&sessionid, CDFC4_BACK);
+    let compound = encode_compound("bind-back-only", &[&bind_op]);
+    let mut resp = send_rpc(&mut back_stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_BIND_CONN_TO_SESSION);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (_, dir, _) = parse_bind_conn_to_session_res(&mut resp);
+    assert_eq!(dir, CDFS4_BACK);
+
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let compound = encode_compound("back-only-sequence", &[&seq_op, &rootfh_op]);
+    let mut resp = send_rpc(&mut back_stream, 4, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::ConnNotBoundToSession as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_SEQUENCE);
+    assert_eq!(op_status, NfsStat4::ConnNotBoundToSession as u32);
+}
+
 /// BIND_CONN_TO_SESSION with an unknown session returns `NFS4ERR_BADSESSION`.
 /// Origin: RFC 8881 §18.34.3; no direct pynfs server41tests case.
 /// RFC: RFC 8881 §18.34.3.

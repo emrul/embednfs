@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use embednfs_proto::*;
 use tokio::time::sleep;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::fs::{FileSystem, FsError, FsResult, RequestContext};
 use crate::internal::{ServerFileType, ServerObject};
@@ -29,6 +29,7 @@ impl<F: FileSystem> NfsServer<F> {
         let Some(clientid) = sequence_clientid else {
             return NfsResop4::GetDirDelegation(NfsStat4::OpNotInSession, None);
         };
+        info!("metric=get_dir_delegation_seen clientid={clientid}");
 
         let (_, object) = match self.resolve_object(current_fh).await {
             Ok(resolved) => resolved,
@@ -69,16 +70,22 @@ impl<F: FileSystem> NfsServer<F> {
             )
             .await
         {
-            Ok(DirectoryDelegationGrant::Granted(stateid)) => NfsResop4::GetDirDelegation(
-                NfsStat4::Ok,
-                Some(GetDirDelegationRes4::Ok(GetDirDelegationResOk4 {
-                    cookieverf: attr.change_id.to_be_bytes(),
-                    stateid,
-                    notification: Bitmap4::new(),
-                    child_attributes: Bitmap4::new(),
-                    dir_attributes: Bitmap4::new(),
-                })),
-            ),
+            Ok(DirectoryDelegationGrant::Granted(stateid)) => {
+                info!(
+                    "metric=get_dir_delegation_ok clientid={} stateid_seqid={}",
+                    clientid, stateid.seqid
+                );
+                NfsResop4::GetDirDelegation(
+                    NfsStat4::Ok,
+                    Some(GetDirDelegationRes4::Ok(GetDirDelegationResOk4 {
+                        cookieverf: attr.change_id.to_be_bytes(),
+                        stateid,
+                        notification: Bitmap4::new(),
+                        child_attributes: Bitmap4::new(),
+                        dir_attributes: Bitmap4::new(),
+                    })),
+                )
+            }
             Ok(DirectoryDelegationGrant::AlreadyHeld) => NfsResop4::GetDirDelegation(
                 NfsStat4::Ok,
                 Some(GetDirDelegationRes4::Unavail {
@@ -205,6 +212,11 @@ async fn recall_directory_delegations(
             );
             if let Err(revoke_status) = state.revoke_recallable_delegation(&recall.stateid).await {
                 debug!("delegation revoke after callback failure failed: {revoke_status:?}");
+            } else {
+                info!(
+                    "metric=revocation_count reason=callback_failure clientid={}",
+                    recall.clientid
+                );
             }
         }
     }
@@ -222,6 +234,10 @@ async fn send_directory_recall(
     let target = next_callback_target(state, backchannels, recall.clientid)
         .await
         .ok_or(NfsStat4::CbPathDown)?;
+    info!(
+        "metric=cb_recall_sent clientid={} connection_id={}",
+        recall.clientid, target.connection_id
+    );
     let response = backchannels
         .send_callback(CallbackRequest {
             connection_id: target.connection_id,
@@ -251,7 +267,9 @@ async fn send_directory_recall(
         .await
         .map_err(callback_error_status)?;
 
-    validate_recall_response(&response)
+    validate_recall_response(&response)?;
+    info!("metric=cb_recall_ok clientid={}", recall.clientid);
+    Ok(())
 }
 
 async fn wait_for_recalled_delegations(
@@ -260,6 +278,7 @@ async fn wait_for_recalled_delegations(
     recalls: &[DirectoryDelegationRecall],
 ) -> Result<(), NfsStat4> {
     let deadline = Instant::now() + delegation_config.recall_timeout;
+    let started = Instant::now();
     let mut outstanding: Vec<Stateid4> = recalls.iter().map(|recall| recall.stateid).collect();
 
     loop {
@@ -270,15 +289,26 @@ async fn wait_for_recalled_delegations(
             }
         }
         if remaining.is_empty() {
+            info!(
+                "metric=recall_wait_ms value={}",
+                started.elapsed().as_millis()
+            );
             return Ok(());
         }
 
         if Instant::now() >= deadline {
+            info!("metric=recall_timeout count={}", remaining.len());
             for stateid in &remaining {
                 if let Err(status) = state.revoke_recallable_delegation(stateid).await {
                     debug!("delegation revoke after recall timeout failed: {status:?}");
+                } else {
+                    info!("metric=revocation_count reason=timeout");
                 }
             }
+            info!(
+                "metric=recall_wait_ms value={}",
+                started.elapsed().as_millis()
+            );
             return Ok(());
         }
 

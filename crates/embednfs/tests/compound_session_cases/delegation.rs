@@ -101,6 +101,18 @@ async fn send_rpc_handling_callbacks_and_delegreturn(
                 callback_count += 1;
                 reply_to_callback(stream, record).await;
                 if !sent_delegreturn {
+                    match tokio::time::timeout(Duration::from_millis(50), read_record(stream)).await
+                    {
+                        Ok(record) => {
+                            let mut peek = record.clone();
+                            let early_xid = u32::decode(&mut peek).unwrap();
+                            let early_msg_type = MsgType::decode(&mut peek).unwrap();
+                            panic!(
+                                "received {early_msg_type:?} xid {early_xid} before DELEGRETURN"
+                            );
+                        }
+                        Err(_) => {}
+                    }
                     write_delegreturn_call(stream, DELEGRETURN_XID, sessionid, stateid).await;
                     sent_delegreturn = true;
                 }

@@ -54,7 +54,9 @@ impl StateManager {
             let Some(session) = inner.sessions.get_mut(&args.sessionid) else {
                 return SequenceReplay::Error(NfsStat4::BadSession);
             };
-            let _ = session.fore_connections.insert(connection_id);
+            if let Err(status) = bind_forechannel_for_sequence(session, connection_id) {
+                return SequenceReplay::Error(status);
+            }
             return SequenceReplay::StatusOnly(Self::sequence_res(session, args, status_flags));
         }
         let status_flags = client.status_flags;
@@ -63,7 +65,9 @@ impl StateManager {
             let Some(session) = inner.sessions.get_mut(&args.sessionid) else {
                 return SequenceReplay::Error(NfsStat4::BadSession);
             };
-            let _ = session.fore_connections.insert(connection_id);
+            if let Err(status) = bind_forechannel_for_sequence(session, connection_id) {
+                return SequenceReplay::Error(status);
+            }
             let slot = &mut session.slots[slot_idx];
             let retry_seq = slot.sequence_id.wrapping_sub(1);
 
@@ -135,4 +139,17 @@ impl StateManager {
         });
         Ok(())
     }
+}
+
+fn bind_forechannel_for_sequence(
+    session: &mut SessionState,
+    connection_id: u64,
+) -> Result<(), NfsStat4> {
+    if session.back_connections.contains(&connection_id)
+        && !session.fore_connections.contains(&connection_id)
+    {
+        return Err(NfsStat4::ConnNotBoundToSession);
+    }
+    let _ = session.fore_connections.insert(connection_id);
+    Ok(())
 }

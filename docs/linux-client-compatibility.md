@@ -104,12 +104,22 @@ and delegation-trace probes.
 The xattr step was skipped because `setfattr` and `getfattr` were not installed
 on the host. That skip is not a protocol result.
 
-With directory delegations enabled, this kernel did not send
-`GET_DIR_DELEGATION`, `BACKCHANNEL_CTL`, callback traffic, or `DELEGRETURN`.
-The delegation trace summary was:
+With directory delegations enabled, this kernel negotiated a `CREATE_SESSION`
+backchannel but did not send `GET_DIR_DELEGATION`, callback traffic, or
+`DELEGRETURN`. The current strict trace summary shape is:
 
 ```text
-gdd=0 gdd_ok=0 recall=0 backchannel_ctl=0
+create_session_backchannel_ok=2
+bind_conn_to_session_backchannel_ok=0
+get_dir_delegation_seen=0
+get_dir_delegation_ok=0
+cb_recall_sent=0
+cb_recall_ok=0
+delegreturn_seen=0
+recall_wait_ms_p50=NA
+recall_wait_ms_p95=NA
+recall_timeout_count=0
+revocation_count=0
 ```
 
 The observed NFS module parameters did not include a directory-delegation client
@@ -273,9 +283,19 @@ It starts `embednfsd`, mounts `127.0.0.1:/` with NFSv4.1, writes per-probe logs 
 Useful harness controls:
 
 - `DIRECTORY_DELEGATIONS=1` enables `DelegationConfig::directory_delegations` in `embednfsd`.
+- `REQUIRE_DELEGATIONS=1` makes the trace probe fail if the client does not negotiate and use the directory-delegation path.
 - `RECALL_TIMEOUT_MS=1000` sets the delegation recall timeout for the daemon.
+- `PRODUCT_BEHAVIOR=1` enables the external-change product probe. The harness starts the opt-in `embednfsd` control listener and sends `RECALL /` before every direct backing-directory mutation.
+- `CONTROL_ADDR=127.0.0.1:12050` changes the default control listener used by the product probe.
+- `EXTERNAL_RECALL_CMD='...'` overrides the built-in control command when testing a different embedder; the command must recall the exported directory before the harness mutates `BACKING_DIR`.
+- `VISIBILITY_TARGET_MS=1000` and `VISIBILITY_TIMEOUT_MS=5000` set the product probe's pass/fail threshold and hard wait limit for externally created, removed, and renamed names becoming visible through the mount.
 - `SERVER_RUST_LOG=embednfs=debug,embednfsd=info` captures COMPOUND and delegation trace evidence.
 - `SERVER_CARGO_TARGET_DIR=/tmp/embednfs-phase5-target` reuses build artifacts across repeated VM runs.
+
+Against the current stock Linux host, `REQUIRE_DELEGATIONS=1` is expected to
+fail because `get_dir_delegation_seen=0`. Treat that as a useful guardrail: it
+prevents a normal Linux v4.1 non-regression smoke from being mistaken for real
+directory-delegation interoperability.
 
 ### Phase 1: Mount and Metadata
 

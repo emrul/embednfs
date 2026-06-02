@@ -10,17 +10,20 @@ use bytes::Bytes;
 use embednfs::{
     AccessMask, Attrs, CommitSupport, CreateKind, CreateRequest, CreateResult, DelegationConfig,
     DirEntry, DirPage, FileSystem, FsCapabilities, FsError, FsLimits, FsResult, FsStats, HardLinks,
-    NfsServer, ObjectType, ReadResult, RequestContext, SetAttrs, SetTime, Symlinks, Timestamp,
-    WriteResult, WriteStability,
+    NfsServer, NfsServerControl, ObjectType, ReadResult, RequestContext, SetAttrs, SetTime,
+    Symlinks, Timestamp, WriteResult, WriteStability,
 };
 #[cfg(target_os = "linux")]
 use embednfs::{XattrSetMode, Xattrs};
-use tracing::info;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tracing::{debug, error, info};
 
 const DEFAULT_ROOT: &str = "/tmp/embednfs-root";
 const DEFAULT_LISTEN: &str = "0.0.0.0:2049";
 const DEFAULT_DIRECTORY_DELEGATIONS: bool = false;
 const DEFAULT_RECALL_TIMEOUT_MS: u64 = 5_000;
+const CONTROL_RECALL_ROOT: &str = "RECALL /";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LocalHandle(PathBuf);
@@ -558,6 +561,7 @@ async fn main() -> std::io::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT));
     let listen = std::env::var("EMBEDNFS_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
+    let control_listen = env_optional("EMBEDNFS_CONTROL_LISTEN");
     let delegation_config = delegation_config_from_env()
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 
@@ -568,11 +572,62 @@ async fn main() -> std::io::Result<()> {
         fs.root.display(),
         delegation_config.directory_delegations
     );
-    NfsServer::builder(fs)
+    let server = NfsServer::builder(fs)
         .delegation_config(delegation_config)
-        .build()
-        .listen(&listen)
-        .await
+        .build();
+
+    if let Some(control_addr) = control_listen {
+        let control_listener = TcpListener::bind(&control_addr).await?;
+        let control = server.control_handle();
+        std::mem::drop(tokio::spawn(async move {
+            if let Err(err) = serve_control(control_listener, control).await {
+                error!("control listener failed: {err}");
+            }
+        }));
+    }
+
+    server.listen(&listen).await
+}
+
+async fn serve_control(
+    listener: TcpListener,
+    control: NfsServerControl<LocalHandle>,
+) -> std::io::Result<()> {
+    let local_addr = listener.local_addr()?;
+    info!("control listener accepting commands on {local_addr}");
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let control = control.clone();
+        std::mem::drop(tokio::spawn(async move {
+            if let Err(err) = handle_control_connection(stream, control).await {
+                debug!("control connection error from {peer}: {err}");
+            }
+        }));
+    }
+}
+
+async fn handle_control_connection(
+    stream: TcpStream,
+    control: NfsServerControl<LocalHandle>,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream);
+    let mut command = String::new();
+    if reader.read_line(&mut command).await? == 0 {
+        return Ok(());
+    }
+
+    let mut stream = reader.into_inner();
+    match command.trim() {
+        CONTROL_RECALL_ROOT => match control.recall_directory(&LocalHandle(PathBuf::new())).await {
+            Ok(()) => stream.write_all(b"OK\n").await?,
+            Err(err) => {
+                let response = format!("ERR {err}\n");
+                stream.write_all(response.as_bytes()).await?;
+            }
+        },
+        _ => stream.write_all(b"ERR unknown command\n").await?,
+    }
+    stream.shutdown().await
 }
 
 fn delegation_config_from_env() -> Result<DelegationConfig, String> {
@@ -586,6 +641,12 @@ fn delegation_config_from_env() -> Result<DelegationConfig, String> {
     let recall_ms = env_u64("EMBEDNFS_RECALL_TIMEOUT_MS", DEFAULT_RECALL_TIMEOUT_MS)?;
     config.recall_timeout = std::time::Duration::from_millis(recall_ms);
     Ok(config)
+}
+
+fn env_optional(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn env_bool(name: &str, default: bool) -> Result<bool, String> {

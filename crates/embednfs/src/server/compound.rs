@@ -1,4 +1,4 @@
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 use embednfs_proto::*;
 
@@ -381,7 +381,10 @@ impl<F: FileSystem> NfsServer<F> {
                         .return_delegation_state(&stateid, sequence_clientid)
                         .await
                     {
-                        Ok(()) => NfsResop4::DelegReturn(NfsStat4::Ok),
+                        Ok(()) => {
+                            info!("metric=delegreturn_seen clientid={:?}", sequence_clientid);
+                            NfsResop4::DelegReturn(NfsStat4::Ok)
+                        }
                         Err(status) => NfsResop4::DelegReturn(status),
                     }
                 } else {

@@ -11,10 +11,17 @@ SERVER_PID_FILE="${SERVER_PID_FILE:-${ARTIFACT_DIR}/server.pid}"
 SUMMARY_FILE="${SUMMARY_FILE:-${ARTIFACT_DIR}/summary.tsv}"
 SERVER_PORT="${SERVER_PORT:-12049}"
 SERVER_ADDR="${SERVER_ADDR:-127.0.0.1:${SERVER_PORT}}"
+CONTROL_PORT="${CONTROL_PORT:-12050}"
+CONTROL_ADDR="${CONTROL_ADDR:-127.0.0.1:${CONTROL_PORT}}"
 SERVER_CMD="${SERVER_CMD:-cargo run -p embednfsd --release}"
 SERVER_RUST_LOG="${SERVER_RUST_LOG:-embednfs=debug,embednfsd=info}"
 DIRECTORY_DELEGATIONS="${DIRECTORY_DELEGATIONS:-0}"
+REQUIRE_DELEGATIONS="${REQUIRE_DELEGATIONS:-0}"
+PRODUCT_BEHAVIOR="${PRODUCT_BEHAVIOR:-0}"
 RECALL_TIMEOUT_MS="${RECALL_TIMEOUT_MS:-1000}"
+VISIBILITY_TIMEOUT_MS="${VISIBILITY_TIMEOUT_MS:-5000}"
+VISIBILITY_TARGET_MS="${VISIBILITY_TARGET_MS:-1000}"
+EXTERNAL_RECALL_CMD="${EXTERNAL_RECALL_CMD:-}"
 EMBEDNFS_RUSTC_WRAPPER="${EMBEDNFS_RUSTC_WRAPPER:-}"
 SERVER_CARGO_TARGET_DIR="${SERVER_CARGO_TARGET_DIR:-${ARTIFACT_DIR}/target}"
 NFS_VERSION="${NFS_VERSION:-4.1}"
@@ -200,6 +207,11 @@ wait_for_port_close() {
 }
 
 start_server() {
+  local control_listen=""
+  if [[ "${PRODUCT_BEHAVIOR}" == "1" ]]; then
+    control_listen="${CONTROL_ADDR}"
+  fi
+
   (
     cd "${ROOT_DIR}"
     RUST_LOG="${SERVER_RUST_LOG}" \
@@ -207,6 +219,7 @@ start_server() {
       CARGO_TARGET_DIR="${SERVER_CARGO_TARGET_DIR}" \
       EMBEDNFS_ROOT="${BACKING_DIR}" \
       EMBEDNFS_LISTEN="${SERVER_ADDR}" \
+      EMBEDNFS_CONTROL_LISTEN="${control_listen}" \
       EMBEDNFS_DIRECTORY_DELEGATIONS="${DIRECTORY_DELEGATIONS}" \
       EMBEDNFS_RECALL_TIMEOUT_MS="${RECALL_TIMEOUT_MS}" \
       bash -lc "${SERVER_CMD}"
@@ -220,27 +233,83 @@ count_server_log() {
   grep -Ec "${pattern}" "${SERVER_LOG}" 2>/dev/null || true
 }
 
-probe_delegation_trace() {
-  local get_dir_count
-  local get_dir_ok_count
-  local recall_count
-  local backchannel_ctl_count
+count_metric() {
+  local metric="$1"
+  count_server_log "metric=${metric}([^A-Za-z0-9_]|$)"
+}
 
-  get_dir_count="$(count_server_log 'GET_DIR_DELEGATION')"
-  get_dir_ok_count="$(count_server_log 'result: op=GET_DIR_DELEGATION, status=Ok')"
-  recall_count="$(count_server_log 'CB_RECALL|op=DELEGRETURN')"
-  backchannel_ctl_count="$(count_server_log 'BACKCHANNEL_CTL')"
+percentile() {
+  local percentile="$1"
+  shift
+  if (( "$#" == 0 )); then
+    printf 'NA\n'
+    return
+  fi
+  printf '%s\n' "$@" | sort -n | awk -v p="${percentile}" '
+    { values[NR] = $1 }
+    END {
+      idx = int((p * NR + 99) / 100)
+      if (idx < 1) {
+        idx = 1
+      }
+      if (idx > NR) {
+        idx = NR
+      }
+      print values[idx]
+    }
+  '
+}
+
+metric_recall_wait_percentile() {
+  local percentile="$1"
+  mapfile -t waits < <(sed -n 's/.*metric=recall_wait_ms value=\([0-9][0-9]*\).*/\1/p' "${SERVER_LOG}" 2>/dev/null || true)
+  percentile "${percentile}" "${waits[@]}"
+}
+
+probe_delegation_trace() {
+  local create_session_backchannel_ok
+  local bind_conn_to_session_backchannel_ok
+  local get_dir_delegation_seen
+  local get_dir_delegation_ok
+  local cb_recall_sent
+  local cb_recall_ok
+  local delegreturn_seen
+  local recall_wait_ms_p50
+  local recall_wait_ms_p95
+  local recall_timeout_count
+  local revocation_count
+
+  create_session_backchannel_ok="$(count_metric 'create_session_backchannel_ok')"
+  bind_conn_to_session_backchannel_ok="$(count_metric 'bind_conn_to_session_backchannel_ok')"
+  get_dir_delegation_seen="$(count_metric 'get_dir_delegation_seen')"
+  get_dir_delegation_ok="$(count_metric 'get_dir_delegation_ok')"
+  cb_recall_sent="$(count_metric 'cb_recall_sent')"
+  cb_recall_ok="$(count_metric 'cb_recall_ok')"
+  delegreturn_seen="$(count_metric 'delegreturn_seen')"
+  recall_wait_ms_p50="$(metric_recall_wait_percentile 50)"
+  recall_wait_ms_p95="$(metric_recall_wait_percentile 95)"
+  recall_timeout_count="$(count_metric 'recall_timeout')"
+  revocation_count="$(count_metric 'revocation_count')"
 
   {
     printf 'kernel=%s\n' "$(uname -r)"
     printf 'mount_opts=%s\n' "${MOUNT_OPTS}"
     printf 'directory_delegations=%s\n' "${DIRECTORY_DELEGATIONS}"
+    printf 'require_delegations=%s\n' "${REQUIRE_DELEGATIONS}"
+    printf 'product_behavior=%s\n' "${PRODUCT_BEHAVIOR}"
     printf 'recall_timeout_ms=%s\n' "${RECALL_TIMEOUT_MS}"
     printf 'server_log=%s\n' "${SERVER_LOG}"
-    printf 'get_dir_delegation_lines=%s\n' "${get_dir_count}"
-    printf 'get_dir_delegation_ok_lines=%s\n' "${get_dir_ok_count}"
-    printf 'recall_or_delegreturn_lines=%s\n' "${recall_count}"
-    printf 'backchannel_ctl_lines=%s\n' "${backchannel_ctl_count}"
+    printf 'create_session_backchannel_ok=%s\n' "${create_session_backchannel_ok}"
+    printf 'bind_conn_to_session_backchannel_ok=%s\n' "${bind_conn_to_session_backchannel_ok}"
+    printf 'get_dir_delegation_seen=%s\n' "${get_dir_delegation_seen}"
+    printf 'get_dir_delegation_ok=%s\n' "${get_dir_delegation_ok}"
+    printf 'cb_recall_sent=%s\n' "${cb_recall_sent}"
+    printf 'cb_recall_ok=%s\n' "${cb_recall_ok}"
+    printf 'delegreturn_seen=%s\n' "${delegreturn_seen}"
+    printf 'recall_wait_ms_p50=%s\n' "${recall_wait_ms_p50}"
+    printf 'recall_wait_ms_p95=%s\n' "${recall_wait_ms_p95}"
+    printf 'recall_timeout_count=%s\n' "${recall_timeout_count}"
+    printf 'revocation_count=%s\n' "${revocation_count}"
     if [[ -d /sys/module/nfs/parameters ]]; then
       printf '\n[nfs module parameters]\n'
       for param in /sys/module/nfs/parameters/*; do
@@ -250,7 +319,195 @@ probe_delegation_trace() {
   }
 
   record "INFO" "delegation-trace" \
-    "gdd=${get_dir_count} gdd_ok=${get_dir_ok_count} recall=${recall_count} backchannel_ctl=${backchannel_ctl_count}"
+    "create_session_backchannel_ok=${create_session_backchannel_ok} bind_conn_to_session_backchannel_ok=${bind_conn_to_session_backchannel_ok} get_dir_delegation_seen=${get_dir_delegation_seen} get_dir_delegation_ok=${get_dir_delegation_ok} cb_recall_sent=${cb_recall_sent} cb_recall_ok=${cb_recall_ok} delegreturn_seen=${delegreturn_seen} recall_wait_ms_p50=${recall_wait_ms_p50} recall_wait_ms_p95=${recall_wait_ms_p95} recall_timeout_count=${recall_timeout_count} revocation_count=${revocation_count}"
+
+  if [[ "${REQUIRE_DELEGATIONS}" == "1" ]]; then
+    local gate_failures=0
+    if [[ "${DIRECTORY_DELEGATIONS}" != "1" ]]; then
+      echo "REQUIRE_DELEGATIONS=1 requires DIRECTORY_DELEGATIONS=1"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( create_session_backchannel_ok + bind_conn_to_session_backchannel_ok == 0 )); then
+      echo "delegation gate failed: no usable backchannel was negotiated"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( get_dir_delegation_seen == 0 )); then
+      echo "delegation gate failed: client never sent GET_DIR_DELEGATION"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( get_dir_delegation_ok == 0 )); then
+      echo "delegation gate failed: server never returned GDD4_OK"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( cb_recall_sent == 0 )); then
+      echo "delegation gate failed: server never sent CB_RECALL"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( cb_recall_ok == 0 )); then
+      echo "delegation gate failed: client never acknowledged CB_RECALL successfully"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( delegreturn_seen == 0 )); then
+      echo "delegation gate failed: client never sent DELEGRETURN"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( recall_timeout_count != 0 )); then
+      echo "delegation gate failed: recall timeout count is ${recall_timeout_count}"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( revocation_count != 0 )); then
+      echo "delegation gate failed: revocation count is ${revocation_count}"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if [[ "${recall_wait_ms_p95}" != "NA" ]] && (( recall_wait_ms_p95 >= RECALL_TIMEOUT_MS )); then
+      echo "delegation gate failed: recall p95 ${recall_wait_ms_p95}ms reached recall timeout ${RECALL_TIMEOUT_MS}ms"
+      gate_failures=$((gate_failures + 1))
+    fi
+    if (( gate_failures != 0 )); then
+      return 1
+    fi
+  fi
+}
+
+now_ms() {
+  date +%s%3N
+}
+
+wait_for_path_state() {
+  local path="$1"
+  local state="$2"
+  local timeout_ms="$3"
+  local start_ms
+  local now
+  start_ms="$(now_ms)"
+  while true; do
+    if [[ "${state}" == "present" && -e "${path}" ]]; then
+      now="$(now_ms)"
+      printf '%s\n' "$((now - start_ms))"
+      return 0
+    fi
+    if [[ "${state}" == "absent" && ! -e "${path}" ]]; then
+      now="$(now_ms)"
+      printf '%s\n' "$((now - start_ms))"
+      return 0
+    fi
+    now="$(now_ms)"
+    if (( now - start_ms >= timeout_ms )); then
+      printf '%s\n' "$((now - start_ms))"
+      return 1
+    fi
+    sleep 0.025
+  done
+}
+
+probe_delegation_product_behavior() {
+  local lookup_before
+  local getattr_before
+  local lookup_after
+  local getattr_after
+  local missing="${MOUNT_DIR}/missing-negative-probe"
+  local create_name="external-create-$$"
+  local unlink_name="external-unlink-$$"
+  local rename_from="external-rename-from-$$"
+  local rename_to="external-rename-to-$$"
+  local create_ms
+  local unlink_ms
+  local rename_ms
+
+  lookup_before="$(count_server_log 'COMPOUND:.*"LOOKUP"')"
+  getattr_before="$(count_server_log 'COMPOUND:.*"GETATTR"')"
+
+  for _ in $(seq 1 100); do
+    test ! -e "${missing}"
+  done
+  for _ in $(seq 1 20); do
+    stat "${MOUNT_DIR}" >/dev/null
+  done
+
+  lookup_after="$(count_server_log 'COMPOUND:.*"LOOKUP"')"
+  getattr_after="$(count_server_log 'COMPOUND:.*"GETATTR"')"
+
+  run_external_recall "before external create"
+  printf 'external\n' >"${BACKING_DIR}/${create_name}"
+  create_ms="$(wait_for_path_state "${MOUNT_DIR}/${create_name}" present "${VISIBILITY_TIMEOUT_MS}")"
+  test -f "${MOUNT_DIR}/${create_name}"
+
+  run_external_recall "before external unlink setup create"
+  printf 'external\n' >"${BACKING_DIR}/${unlink_name}"
+  wait_for_path_state "${MOUNT_DIR}/${unlink_name}" present "${VISIBILITY_TIMEOUT_MS}" >/dev/null
+  test -f "${MOUNT_DIR}/${unlink_name}"
+  run_external_recall "before external unlink"
+  rm "${BACKING_DIR}/${unlink_name}"
+  unlink_ms="$(wait_for_path_state "${MOUNT_DIR}/${unlink_name}" absent "${VISIBILITY_TIMEOUT_MS}")"
+  test ! -e "${MOUNT_DIR}/${unlink_name}"
+
+  run_external_recall "before external rename setup create"
+  printf 'external\n' >"${BACKING_DIR}/${rename_from}"
+  wait_for_path_state "${MOUNT_DIR}/${rename_from}" present "${VISIBILITY_TIMEOUT_MS}" >/dev/null
+  test -f "${MOUNT_DIR}/${rename_from}"
+  run_external_recall "before external rename"
+  mv "${BACKING_DIR}/${rename_from}" "${BACKING_DIR}/${rename_to}"
+  rename_ms="$(wait_for_path_state "${MOUNT_DIR}/${rename_to}" present "${VISIBILITY_TIMEOUT_MS}")"
+  test -f "${MOUNT_DIR}/${rename_to}"
+  test ! -e "${MOUNT_DIR}/${rename_from}"
+
+  mkdir "${MOUNT_DIR}/client-deleg-dir"
+  printf 'client\n' >"${MOUNT_DIR}/client-deleg-dir/file.txt"
+  mv "${MOUNT_DIR}/client-deleg-dir/file.txt" "${MOUNT_DIR}/client-deleg-dir/file-renamed.txt"
+  rm "${MOUNT_DIR}/client-deleg-dir/file-renamed.txt"
+  rmdir "${MOUNT_DIR}/client-deleg-dir"
+
+  {
+    printf 'negative_lookup_probe_count=100\n'
+    printf 'lookup_delta=%s\n' "$((lookup_after - lookup_before))"
+    printf 'getattr_delta=%s\n' "$((getattr_after - getattr_before))"
+    printf 'external_create_visibility_ms=%s\n' "${create_ms}"
+    printf 'external_unlink_visibility_ms=%s\n' "${unlink_ms}"
+    printf 'external_rename_visibility_ms=%s\n' "${rename_ms}"
+    printf 'visibility_target_ms=%s\n' "${VISIBILITY_TARGET_MS}"
+    printf 'visibility_timeout_ms=%s\n' "${VISIBILITY_TIMEOUT_MS}"
+  }
+
+  record "INFO" "delegation-product-counters" \
+    "lookup_delta=$((lookup_after - lookup_before)) getattr_delta=$((getattr_after - getattr_before)) create_ms=${create_ms} unlink_ms=${unlink_ms} rename_ms=${rename_ms} target_ms=${VISIBILITY_TARGET_MS}"
+
+  if (( create_ms > VISIBILITY_TARGET_MS )); then
+    echo "product gate failed: external create visibility ${create_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
+    return 1
+  fi
+  if (( unlink_ms > VISIBILITY_TARGET_MS )); then
+    echo "product gate failed: external unlink visibility ${unlink_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
+    return 1
+  fi
+  if (( rename_ms > VISIBILITY_TARGET_MS )); then
+    echo "product gate failed: external rename visibility ${rename_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
+    return 1
+  fi
+}
+
+run_external_recall() {
+  local reason="$1"
+  log "Running external recall hook: ${reason}"
+  if [[ -n "${EXTERNAL_RECALL_CMD}" ]]; then
+    BACKING_DIR="${BACKING_DIR}" \
+      MOUNT_DIR="${MOUNT_DIR}" \
+      SERVER_ADDR="${SERVER_ADDR}" \
+      CONTROL_ADDR="${CONTROL_ADDR}" \
+      bash -lc "${EXTERNAL_RECALL_CMD}"
+    return
+  fi
+
+  local host="${CONTROL_ADDR%:*}"
+  local port="${CONTROL_ADDR##*:}"
+  local response=""
+  response="$(
+    timeout 5 bash -c \
+      "exec 3<>/dev/tcp/${host}/${port}; printf 'RECALL /\\n' >&3; IFS= read -r response <&3; printf '%s\\n' \"\${response}\""
+  )"
+  if [[ "${response}" != "OK" ]]; then
+    echo "control recall failed: ${response}"
+    return 1
+  fi
 }
 
 probe_mount_metadata() {
@@ -415,6 +672,11 @@ log "Backing directory: ${BACKING_DIR}"
 log "Mount directory: ${MOUNT_DIR}"
 log "NFS version: ${NFS_VERSION}"
 log "Directory delegations: ${DIRECTORY_DELEGATIONS}"
+log "Require delegations: ${REQUIRE_DELEGATIONS}"
+log "Product behavior probe: ${PRODUCT_BEHAVIOR}"
+if [[ "${PRODUCT_BEHAVIOR}" == "1" ]]; then
+  log "Control address: ${CONTROL_ADDR}"
+fi
 log "Starting server on ${SERVER_ADDR}"
 start_server
 
@@ -445,6 +707,9 @@ else
 fi
 
 run_step "server-restart-recovery" probe_recovery_restart
+if [[ "${PRODUCT_BEHAVIOR}" == "1" ]]; then
+  run_step "delegation-product-behavior" probe_delegation_product_behavior
+fi
 run_step "delegation-trace" probe_delegation_trace
 
 log "Summary"

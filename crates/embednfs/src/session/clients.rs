@@ -12,6 +12,7 @@ use embednfs_proto::{
     SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED, Sessionid4, SetClientIdArgs4, SetClientIdConfirmArgs4,
     SetClientIdRes4, StateProtect4R, Verifier4,
 };
+use tracing::info;
 
 use super::model::{
     BackchannelState, CallbackTarget, ClientLeaseState, ClientState, SessionState, SlotState,
@@ -206,6 +207,12 @@ impl StateManager {
         } else {
             HashSet::new()
         };
+        if accept_current_backchannel {
+            info!(
+                "metric=create_session_backchannel_ok clientid={} connection_id={} cb_program={}",
+                args.clientid, connection_id, args.cb_program
+            );
+        }
 
         let _ = inner.sessions.insert(
             sessionid,
@@ -276,6 +283,12 @@ impl StateManager {
             return Err(NfsStat4::BadSession);
         };
         let response_dir = bind_connection_direction(session, args.dir, connection_id)?;
+        if response_dir & CDFS4_BACK != 0 {
+            info!(
+                "metric=bind_conn_to_session_backchannel_ok connection_id={} client_dir={} server_dir={}",
+                connection_id, args.dir, response_dir
+            );
+        }
         Ok(BindConnToSessionRes4 {
             sessionid: args.sessionid,
             dir: response_dir,
