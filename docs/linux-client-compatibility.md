@@ -86,6 +86,21 @@ ARTIFACT_DIR=/tmp/embednfs-linux-smoke-deleg-1e2f023 \
   ./scripts/smoke-linux-nfs41.sh
 ```
 
+After the backchannel negotiation fixes in commit `7ff451c`, the enabled run was
+repeated with the same host, kernel, mount options, and reusable target
+directory:
+
+```bash
+ARTIFACT_DIR=/tmp/embednfs-linux-smoke-deleg-7ff451c \
+  SERVER_CARGO_TARGET_DIR=/tmp/embednfs-phase5-target \
+  DIRECTORY_DELEGATIONS=1 \
+  RECALL_TIMEOUT_MS=1000 \
+  ./scripts/smoke-linux-nfs41.sh
+```
+
+That run also passed the mount, metadata, I/O, namespace, link, lock, restart,
+and delegation-trace probes.
+
 The xattr step was skipped because `setfattr` and `getfattr` were not installed
 on the host. That skip is not a protocol result.
 
