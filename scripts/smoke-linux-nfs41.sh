@@ -11,6 +11,9 @@ SUMMARY_FILE="${SUMMARY_FILE:-${ARTIFACT_DIR}/summary.tsv}"
 SERVER_PORT="${SERVER_PORT:-12049}"
 SERVER_ADDR="${SERVER_ADDR:-127.0.0.1:${SERVER_PORT}}"
 SERVER_CMD="${SERVER_CMD:-cargo run -p embednfsd --release}"
+SERVER_RUST_LOG="${SERVER_RUST_LOG:-embednfs=debug,embednfsd=info}"
+DIRECTORY_DELEGATIONS="${DIRECTORY_DELEGATIONS:-0}"
+RECALL_TIMEOUT_MS="${RECALL_TIMEOUT_MS:-1000}"
 EMBEDNFS_RUSTC_WRAPPER="${EMBEDNFS_RUSTC_WRAPPER:-}"
 SERVER_CARGO_TARGET_DIR="${SERVER_CARGO_TARGET_DIR:-${ARTIFACT_DIR}/target}"
 NFS_VERSION="${NFS_VERSION:-4.1}"
@@ -173,13 +176,54 @@ wait_for_port_close() {
 start_server() {
   (
     cd "${ROOT_DIR}"
-    RUSTC_WRAPPER="${EMBEDNFS_RUSTC_WRAPPER}" \
+    RUST_LOG="${SERVER_RUST_LOG}" \
+      RUSTC_WRAPPER="${EMBEDNFS_RUSTC_WRAPPER}" \
       CARGO_TARGET_DIR="${SERVER_CARGO_TARGET_DIR}" \
       EMBEDNFS_ROOT="${BACKING_DIR}" \
       EMBEDNFS_LISTEN="${SERVER_ADDR}" \
+      EMBEDNFS_DIRECTORY_DELEGATIONS="${DIRECTORY_DELEGATIONS}" \
+      EMBEDNFS_RECALL_TIMEOUT_MS="${RECALL_TIMEOUT_MS}" \
       bash -lc "${SERVER_CMD}"
   ) >>"${SERVER_LOG}" 2>&1 &
   SERVER_PID=$!
+}
+
+count_server_log() {
+  local pattern="$1"
+  grep -Ec "${pattern}" "${SERVER_LOG}" 2>/dev/null || true
+}
+
+probe_delegation_trace() {
+  local get_dir_count
+  local get_dir_ok_count
+  local recall_count
+  local backchannel_ctl_count
+
+  get_dir_count="$(count_server_log 'GET_DIR_DELEGATION')"
+  get_dir_ok_count="$(count_server_log 'result: op=GET_DIR_DELEGATION, status=Ok')"
+  recall_count="$(count_server_log 'CB_RECALL|op=DELEGRETURN')"
+  backchannel_ctl_count="$(count_server_log 'BACKCHANNEL_CTL')"
+
+  {
+    printf 'kernel=%s\n' "$(uname -r)"
+    printf 'mount_opts=%s\n' "${MOUNT_OPTS}"
+    printf 'directory_delegations=%s\n' "${DIRECTORY_DELEGATIONS}"
+    printf 'recall_timeout_ms=%s\n' "${RECALL_TIMEOUT_MS}"
+    printf 'server_log=%s\n' "${SERVER_LOG}"
+    printf 'get_dir_delegation_lines=%s\n' "${get_dir_count}"
+    printf 'get_dir_delegation_ok_lines=%s\n' "${get_dir_ok_count}"
+    printf 'recall_or_delegreturn_lines=%s\n' "${recall_count}"
+    printf 'backchannel_ctl_lines=%s\n' "${backchannel_ctl_count}"
+    if [[ -d /sys/module/nfs/parameters ]]; then
+      printf '\n[nfs module parameters]\n'
+      for param in /sys/module/nfs/parameters/*; do
+        printf '%s=%s\n' "$(basename "${param}")" "$(cat "${param}" 2>/dev/null || true)"
+      done
+    fi
+  }
+
+  record "INFO" "delegation-trace" \
+    "gdd=${get_dir_count} gdd_ok=${get_dir_ok_count} recall=${recall_count} backchannel_ctl=${backchannel_ctl_count}"
 }
 
 probe_mount_metadata() {
@@ -343,6 +387,7 @@ log "Artifacts: ${ARTIFACT_DIR}"
 log "Backing directory: ${BACKING_DIR}"
 log "Mount directory: ${MOUNT_DIR}"
 log "NFS version: ${NFS_VERSION}"
+log "Directory delegations: ${DIRECTORY_DELEGATIONS}"
 log "Starting server on ${SERVER_ADDR}"
 start_server
 
@@ -373,6 +418,7 @@ else
 fi
 
 run_step "server-restart-recovery" probe_recovery_restart
+run_step "delegation-trace" probe_delegation_trace
 
 log "Summary"
 column -t -s $'\t' "${SUMMARY_FILE}" || cat "${SUMMARY_FILE}"

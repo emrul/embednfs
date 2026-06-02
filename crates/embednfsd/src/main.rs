@@ -8,10 +8,10 @@ use std::path::{Component, Path, PathBuf};
 use async_trait::async_trait;
 use bytes::Bytes;
 use embednfs::{
-    AccessMask, Attrs, CommitSupport, CreateKind, CreateRequest, CreateResult, DirEntry, DirPage,
-    FileSystem, FsCapabilities, FsError, FsLimits, FsResult, FsStats, HardLinks, NfsServer,
-    ObjectType, ReadResult, RequestContext, SetAttrs, SetTime, Symlinks, Timestamp, WriteResult,
-    WriteStability,
+    AccessMask, Attrs, CommitSupport, CreateKind, CreateRequest, CreateResult, DelegationConfig,
+    DirEntry, DirPage, FileSystem, FsCapabilities, FsError, FsLimits, FsResult, FsStats, HardLinks,
+    NfsServer, ObjectType, ReadResult, RequestContext, SetAttrs, SetTime, Symlinks, Timestamp,
+    WriteResult, WriteStability,
 };
 #[cfg(target_os = "linux")]
 use embednfs::{XattrSetMode, Xattrs};
@@ -19,6 +19,8 @@ use tracing::info;
 
 const DEFAULT_ROOT: &str = "/tmp/embednfs-root";
 const DEFAULT_LISTEN: &str = "0.0.0.0:2049";
+const DEFAULT_DIRECTORY_DELEGATIONS: bool = false;
+const DEFAULT_RECALL_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LocalHandle(PathBuf);
@@ -556,11 +558,55 @@ async fn main() -> std::io::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT));
     let listen = std::env::var("EMBEDNFS_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
+    let delegation_config = delegation_config_from_env()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 
     let fs = LocalFs::new(root)
         .map_err(|err| std::io::Error::other(format!("failed to initialize local fs: {err}")))?;
-    info!("serving {} on {listen}", fs.root.display());
-    NfsServer::new(fs).listen(&listen).await
+    info!(
+        "serving {} on {listen}; directory_delegations={}",
+        fs.root.display(),
+        delegation_config.directory_delegations
+    );
+    NfsServer::builder(fs)
+        .delegation_config(delegation_config)
+        .build()
+        .listen(&listen)
+        .await
+}
+
+fn delegation_config_from_env() -> Result<DelegationConfig, String> {
+    let mut config = DelegationConfig {
+        directory_delegations: env_bool(
+            "EMBEDNFS_DIRECTORY_DELEGATIONS",
+            DEFAULT_DIRECTORY_DELEGATIONS,
+        )?,
+        ..DelegationConfig::default()
+    };
+    let recall_ms = env_u64("EMBEDNFS_RECALL_TIMEOUT_MS", DEFAULT_RECALL_TIMEOUT_MS)?;
+    config.recall_timeout = std::time::Duration::from_millis(recall_ms);
+    Ok(config)
+}
+
+fn env_bool(name: &str, default: bool) -> Result<bool, String> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(default);
+    };
+    match value.to_string_lossy().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        value => Err(format!("{name} must be a boolean, got {value:?}")),
+    }
+}
+
+fn env_u64(name: &str, default: u64) -> Result<u64, String> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(default);
+    };
+    value
+        .to_string_lossy()
+        .parse()
+        .map_err(|err| format!("{name} must be an unsigned integer: {err}"))
 }
 
 fn reject_unsafe_relative(path: &Path) -> FsResult<()> {
