@@ -198,14 +198,20 @@ impl<F: FileSystem> NfsServer<F> {
             }
             NfsArgop4::Commit(args) => self.op_commit(request_ctx, args, &state.current_fh).await,
             NfsArgop4::Create(args) => {
-                self.op_create(request_ctx, args, &mut state.current_fh)
+                self.op_create(request_ctx, args, &mut state.current_fh, sequence_clientid)
                     .await
             }
             NfsArgop4::Getattr(args) => self.op_getattr(request_ctx, args, &state.current_fh).await,
             NfsArgop4::Getfh => self.op_getfh(&state.current_fh),
             NfsArgop4::Link(args) => {
-                self.op_link(request_ctx, args, &state.current_fh, &state.saved_fh)
-                    .await
+                self.op_link(
+                    request_ctx,
+                    args,
+                    &state.current_fh,
+                    &state.saved_fh,
+                    sequence_clientid,
+                )
+                .await
             }
             NfsArgop4::Lookup(args) => {
                 self.op_lookup(request_ctx, args, &mut state.current_fh)
@@ -221,8 +227,14 @@ impl<F: FileSystem> NfsServer<F> {
                 {
                     return NfsResop4::Open(status, None);
                 }
-                self.op_open(request_ctx, args, &mut state.current_fh, state.minorversion)
-                    .await
+                self.op_open(
+                    request_ctx,
+                    args,
+                    &mut state.current_fh,
+                    state.minorversion,
+                    sequence_clientid,
+                )
+                .await
             }
             NfsArgop4::Putfh(args) => {
                 if !Self::fh_has_valid_format(&args.object) {
@@ -253,10 +265,19 @@ impl<F: FileSystem> NfsServer<F> {
             }
             NfsArgop4::Readdir(args) => self.op_readdir(request_ctx, args, &state.current_fh).await,
             NfsArgop4::Readlink => self.op_readlink(request_ctx, &state.current_fh).await,
-            NfsArgop4::Remove(args) => self.op_remove(request_ctx, args, &state.current_fh).await,
-            NfsArgop4::Rename(args) => {
-                self.op_rename(request_ctx, args, &state.current_fh, &state.saved_fh)
+            NfsArgop4::Remove(args) => {
+                self.op_remove(request_ctx, args, &state.current_fh, sequence_clientid)
                     .await
+            }
+            NfsArgop4::Rename(args) => {
+                self.op_rename(
+                    request_ctx,
+                    args,
+                    &state.current_fh,
+                    &state.saved_fh,
+                    sequence_clientid,
+                )
+                .await
             }
             NfsArgop4::Restorefh => {
                 if let Some(fh) = state.saved_fh.clone() {

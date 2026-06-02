@@ -124,7 +124,9 @@ impl<F: FileSystem> NfsServer<F> {
                 return NfsResop4::Setattr(NfsStat4::Isdir, Bitmap4::new());
             }
             if !set_attrs.is_empty()
-                && let Err(status) = self.recall_directory_delegations(&object).await
+                && let Err(status) = self
+                    .recall_directory_delegations_excluding(&object, sequence_clientid)
+                    .await
             {
                 return NfsResop4::Setattr(status, Bitmap4::new());
             }

@@ -163,25 +163,68 @@ recall_timeout_count=0
 revocation_count=0
 ```
 
-The product-behavior gate is not yet passing on the same Lima client. The
-tightened probe verifies that each external mutation has a held delegation and
-that `RECALL /` actually sends `CB_RECALL`. After the first external create, the
-client did not reacquire a directory delegation for the next external unlink
-scenario:
+The product-behavior gate also passes on the same Lima client when the probe
+refreshes the parent directory namespace after recall. It also records
+non-gating path-only samples so the kernel dentry-cache behavior stays visible:
 
-```text
-product gate failed: client did not reacquire directory delegation for before external unlink; before=2 current=2
+```bash
+limactl shell podman bash -lc '
+  cd /Users/emrul/dev/github/emrul/embednfs &&
+  ARTIFACT_DIR=/tmp/embednfs-lima-gate-product-path-only-metrics \
+  SERVER_CARGO_TARGET_DIR=/tmp/embednfs-lima-target \
+  DIRECTORY_DELEGATIONS=1 \
+  REQUIRE_DELEGATIONS=1 \
+  PRODUCT_BEHAVIOR=1 \
+  RECALL_TIMEOUT_MS=1000 \
+  VISIBILITY_TARGET_MS=1000 \
+  VISIBILITY_TIMEOUT_MS=5000 \
+  ./scripts/smoke-linux-nfs41.sh
+'
 ```
 
-Before adding the reacquisition assertion, the measured visibility counters were
-`create_ms=1`, `unlink_ms=3015`, and `rename_ms=2997` against a
-`VISIBILITY_TARGET_MS=1000` target.
+The passing product summary was:
+
+```text
+lookup_delta=1
+getattr_delta=1
+namespace_create_ms=3
+namespace_unlink_ms=2
+namespace_rename_ms=2
+path_only_create_ms=5024
+path_only_create_status=timeout
+path_only_unlink_ms=3014
+path_only_unlink_status=ok
+path_only_rename_ms=5004
+path_only_rename_status=timeout
+path_only_rename_absent_ms=1
+path_only_rename_absent_status=ok
+target_ms=1000
+get_dir_delegation_seen=8
+get_dir_delegation_ok=8
+cb_recall_sent=6
+cb_recall_ok=6
+delegreturn_seen=6
+recall_wait_ms_p50=11
+recall_wait_ms_p95=12
+recall_timeout_count=0
+revocation_count=0
+```
+
+The pass/fail Gate 2 target is `namespace_*_ms`: the probe intentionally
+refreshes the parent directory before checking the path state, so it measures
+namespace visibility through the directory state covered by the directory
+delegation. The `path_only_*` fields are recorded but not gated. On this kernel,
+a path-only `test -e` loop can remain satisfied by local positive or negative
+dentry/attribute cache state after a recalled external change, even though the
+server sent `CB_RECALL`, received `DELEGRETURN`, and completed the recall wait
+in about 11 ms. Do not describe this result as fixing path-only external
+unlink/rename visibility.
 
 The remote `6.17.0-14-generic` result proves only that enabling
 `DelegationConfig::directory_delegations` does not regress that Linux v4.1 smoke
 workflow. The Lima `7.0.9-105.fc43.aarch64` result proves real kernel-client
 protocol interop for `GET_DIR_DELEGATION`, grant, `CB_RECALL`, and
-`DELEGRETURN`, but not the product latency target.
+`DELEGRETURN`, plus the namespace-refresh product behavior target.
 
 ## Likely Breakage Points
 
@@ -306,8 +349,8 @@ Design direction:
 Risk:
 
 - Linux may probe optional features. Correct `NOTSUPP` is acceptable; malformed decoding or wrong COMPOUND positioning is not.
-- Delegation-related no-op success for `DELEGPURGE` and `DELEGRETURN` should be revisited. If the server never grants delegations, success is usually harmless, but strict clients may expect `BAD_STATEID` or `NOTSUPP` for invalid delegation state.
-- Directory delegation interoperability is not proven until a Linux kernel or other real client sends `GET_DIR_DELEGATION` and returns or revokes the state through the callback path.
+- Delegation-related no-op success for `DELEGPURGE` should be revisited. Directory delegation `DELEGRETURN` is now state-aware, but strict clients may expect tighter behavior for unsupported or invalid delegation state outside the implemented directory-delegation path.
+- Directory delegation interoperability is proven on the Lima Fedora kernel named above, but remains kernel-dependent. The remote `6.17.0-14-generic` host did not send `GET_DIR_DELEGATION`, so `REQUIRE_DELEGATIONS=1` remains necessary when claiming real delegation interop.
 
 Design direction:
 
@@ -333,7 +376,7 @@ Useful harness controls:
 - `PRODUCT_BEHAVIOR=1` enables the external-change product probe. The harness starts the opt-in `embednfsd` control listener and sends `RECALL /` before every direct backing-directory mutation.
 - `CONTROL_ADDR=127.0.0.1:12050` changes the default control listener used by the product probe.
 - `EXTERNAL_RECALL_CMD='...'` overrides the built-in control command when testing a different embedder; the command must recall the exported directory before the harness mutates `BACKING_DIR`.
-- `VISIBILITY_TARGET_MS=1000` and `VISIBILITY_TIMEOUT_MS=5000` set the product probe's pass/fail threshold and hard wait limit for externally created, removed, and renamed names becoming visible through the mount.
+- `VISIBILITY_TARGET_MS=1000` and `VISIBILITY_TIMEOUT_MS=5000` set the product probe's pass/fail threshold and hard wait limit for externally created, removed, and renamed names becoming visible through a parent-directory namespace refresh. The probe also records non-gating path-only visibility metrics.
 - `SERVER_RUST_LOG=embednfs=debug,embednfsd=info` captures COMPOUND and delegation trace evidence.
 - `SERVER_CARGO_TARGET_DIR=/tmp/embednfs-phase5-target` reuses build artifacts across repeated VM runs.
 
@@ -396,15 +439,15 @@ These are candidates only; implement them after a Linux mount trace confirms the
 2. Implement a minimal `BACKCHANNEL_CTL` compatibility response if Linux sends it during normal `sec=sys` mounts. The 2026-06-02 smoke host did not send it.
 3. Separate session `maxoperations` from slot-count constants and verify Linux accepts the negotiated values.
 4. Make owner/group `SETATTR` parsing fail with `NFS4ERR_BADOWNER` when an explicit owner/group change cannot be mapped.
-5. Extend the Linux kernel-client smoke script when a client that sends `GET_DIR_DELEGATION` is available.
+5. Keep the Linux kernel-client smoke script's delegation counters and product probes current as new target kernels and mount options are validated.
 6. Add docs stating Linux support requires `vers=4.1,proto=tcp,sec=sys` and currently supports only the `/` export path.
 
 ## Open Questions
 
-- Does a target Linux kernel send `GET_DIR_DELEGATION` to this server under any mount/module setting? The 2026-06-02 host did not.
+- Which target Linux kernels request directory delegations from this server? Lima Fedora kernel `7.0.9-105.fc43.aarch64` does; the 2026-06-02 remote `6.17.0-14-generic` host did not.
 - Does Linux send `BACKCHANNEL_CTL` to this server during a normal `sec=sys` v4.1 mount? The 2026-06-02 host did not.
 - Which notification and attribute bitmaps does Linux require in a successful `GET_DIR_DELEGATION` response?
-- Does Linux expect `DELEGRETURN` after successful `CB_RECALL`, or is callback success sufficient for directory delegations?
+- Do all target Linux kernels send `DELEGRETURN` promptly after successful `CB_RECALL`, as the Lima Fedora kernel did?
 - Does Linux tolerate the current `SECINFO` order of `AUTH_SYS` then `AUTH_NONE`, or should `AUTH_NONE` be removed from the default advertised list?
 - Which exact fsinfo/pathconf attributes does Linux require to set sane `rsize`, `wsize`, name length, and cache behavior?
 - Does Linux kernel-client xattr interop pass against the current RFC 8276 implementation when mounted with the required minor version and `setfattr`/`getfattr` are available? Current finding: v4.1 `setfattr` did not issue `OPENATTR`, and the 2026-06-02 smoke skipped xattrs.

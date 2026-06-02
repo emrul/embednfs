@@ -208,9 +208,10 @@ impl StateManager {
     }
 
     /// Mark granted delegations for a directory as being recalled.
-    pub(crate) async fn begin_directory_recall(
+    pub(crate) async fn begin_directory_recall_excluding(
         &self,
         object: &ServerObject,
+        excluded_clientid: Option<Clientid4>,
     ) -> Vec<DirectoryDelegationRecall> {
         self.reap_expired_clients().await;
         let mut inner = self.inner.write().await;
@@ -230,6 +231,7 @@ impl StateManager {
                 continue;
             }
             let send_callback = match state.status {
+                DelegationStatus::Granted if excluded_clientid == Some(state.clientid) => continue,
                 DelegationStatus::Granted => {
                     state.status = DelegationStatus::RecallInProgress;
                     state.last_recall_at = Some(now);

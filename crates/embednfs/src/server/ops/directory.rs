@@ -16,6 +16,7 @@ impl<F: FileSystem> NfsServer<F> {
         request_ctx: &RequestContext,
         args: &CreateArgs4,
         current_fh: &mut Option<NfsFh4>,
+        origin_clientid: Option<Clientid4>,
     ) -> NfsResop4 {
         let (_, dir_object) = match self.resolve_object(current_fh).await {
             Ok(resolved) => resolved,
@@ -44,7 +45,10 @@ impl<F: FileSystem> NfsServer<F> {
         if let Err(status) = self.validate_component_name(&args.objname) {
             return NfsResop4::Create(status, None, Bitmap4::new());
         }
-        if let Err(status) = self.recall_directory_delegations(&dir_object).await {
+        if let Err(status) = self
+            .recall_directory_delegations_excluding(&dir_object, origin_clientid)
+            .await
+        {
             return NfsResop4::Create(status, None, Bitmap4::new());
         }
 
@@ -106,6 +110,7 @@ impl<F: FileSystem> NfsServer<F> {
         args: &LinkArgs4,
         current_fh: &Option<NfsFh4>,
         saved_fh: &Option<NfsFh4>,
+        origin_clientid: Option<Clientid4>,
     ) -> NfsResop4 {
         let (_, source) = match self.resolve_object(saved_fh).await {
             Ok(resolved) => resolved,
@@ -133,7 +138,10 @@ impl<F: FileSystem> NfsServer<F> {
         if let Err(status) = self.validate_component_name(&args.newname) {
             return NfsResop4::Link(status, None);
         }
-        if let Err(status) = self.recall_directory_delegations(&target_dir).await {
+        if let Err(status) = self
+            .recall_directory_delegations_excluding(&target_dir, origin_clientid)
+            .await
+        {
             return NfsResop4::Link(status, None);
         }
 
@@ -491,6 +499,7 @@ impl<F: FileSystem> NfsServer<F> {
         request_ctx: &RequestContext,
         args: &RemoveArgs4,
         current_fh: &Option<NfsFh4>,
+        origin_clientid: Option<Clientid4>,
     ) -> NfsResop4 {
         let (_, dir_object) = match self.resolve_object(current_fh).await {
             Ok(resolved) => resolved,
@@ -507,7 +516,9 @@ impl<F: FileSystem> NfsServer<F> {
         if matches!(
             dir_attr_before.file_type,
             ServerFileType::Directory | ServerFileType::NamedAttrDir
-        ) && let Err(status) = self.recall_directory_delegations(&dir_object).await
+        ) && let Err(status) = self
+            .recall_directory_delegations_excluding(&dir_object, origin_clientid)
+            .await
         {
             return NfsResop4::Remove(status, None);
         }
@@ -565,6 +576,7 @@ impl<F: FileSystem> NfsServer<F> {
         args: &RenameArgs4,
         current_fh: &Option<NfsFh4>,
         saved_fh: &Option<NfsFh4>,
+        origin_clientid: Option<Clientid4>,
     ) -> NfsResop4 {
         let (_, src_object) = match self.resolve_object(saved_fh).await {
             Ok(resolved) => resolved,
@@ -590,11 +602,16 @@ impl<F: FileSystem> NfsServer<F> {
             Ok(attr) => attr,
             Err(e) => return NfsResop4::Rename(e.to_nfsstat4(), None, None),
         };
-        if let Err(status) = self.recall_directory_delegations(&src_object).await {
+        if let Err(status) = self
+            .recall_directory_delegations_excluding(&src_object, origin_clientid)
+            .await
+        {
             return NfsResop4::Rename(status, None, None);
         }
         if src_object != tgt_object
-            && let Err(status) = self.recall_directory_delegations(&tgt_object).await
+            && let Err(status) = self
+                .recall_directory_delegations_excluding(&tgt_object, origin_clientid)
+                .await
         {
             return NfsResop4::Rename(status, None, None);
         }

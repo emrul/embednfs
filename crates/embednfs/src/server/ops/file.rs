@@ -240,6 +240,7 @@ impl<F: FileSystem> NfsServer<F> {
         args: &OpenArgs4,
         current_fh: &mut Option<NfsFh4>,
         minorversion: u32,
+        sequence_clientid: Option<Clientid4>,
     ) -> NfsResop4 {
         let (_, container) = match self.resolve_object(current_fh).await {
             Ok(resolved) => resolved,
@@ -290,7 +291,12 @@ impl<F: FileSystem> NfsServer<F> {
                                 }
                                 Createhow4::Exclusive(_) => Default::default(),
                             };
-                            if let Err(status) = self.recall_directory_delegations(&container).await
+                            if let Err(status) = self
+                                .recall_directory_delegations_excluding(
+                                    &container,
+                                    sequence_clientid,
+                                )
+                                .await
                             {
                                 return NfsResop4::Open(status, None);
                             }
@@ -359,7 +365,12 @@ impl<F: FileSystem> NfsServer<F> {
                                 }
                                 Createhow4::Exclusive(_) => Default::default(),
                             };
-                            if let Err(status) = self.recall_directory_delegations(&container).await
+                            if let Err(status) = self
+                                .recall_directory_delegations_excluding(
+                                    &container,
+                                    sequence_clientid,
+                                )
+                                .await
                             {
                                 return NfsResop4::Open(status, None);
                             }

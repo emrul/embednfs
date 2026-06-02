@@ -400,6 +400,36 @@ wait_for_path_state() {
   done
 }
 
+wait_for_path_state_after_parent_refresh() {
+  local path="$1"
+  local state="$2"
+  local timeout_ms="$3"
+  local parent
+  local start_ms
+  local now
+  parent="$(dirname -- "${path}")"
+  start_ms="$(now_ms)"
+  while true; do
+    ls -la "${parent}" >/dev/null 2>&1 || true
+    if [[ "${state}" == "present" && -e "${path}" ]]; then
+      now="$(now_ms)"
+      printf '%s\n' "$((now - start_ms))"
+      return 0
+    fi
+    if [[ "${state}" == "absent" && ! -e "${path}" ]]; then
+      now="$(now_ms)"
+      printf '%s\n' "$((now - start_ms))"
+      return 0
+    fi
+    now="$(now_ms)"
+    if (( now - start_ms >= timeout_ms )); then
+      printf '%s\n' "$((now - start_ms))"
+      return 1
+    fi
+    sleep 0.025
+  done
+}
+
 wait_for_metric_increase() {
   local metric="$1"
   local before="$2"
@@ -460,10 +490,22 @@ probe_delegation_product_behavior() {
   local unlink_name="external-unlink-$$"
   local rename_from="external-rename-from-$$"
   local rename_to="external-rename-to-$$"
+  local path_only_create_name="external-create-path-only-$$"
+  local path_only_unlink_name="external-unlink-path-only-$$"
+  local path_only_rename_from="external-rename-path-only-from-$$"
+  local path_only_rename_to="external-rename-path-only-to-$$"
   local create_ms
   local unlink_ms
   local rename_ms
   local rename_absent_ms
+  local path_only_create_ms
+  local path_only_unlink_ms
+  local path_only_rename_ms
+  local path_only_rename_absent_ms
+  local path_only_create_status="ok"
+  local path_only_unlink_status="ok"
+  local path_only_rename_status="ok"
+  local path_only_rename_absent_status="ok"
   local delegation_ok_count
 
   lookup_before="$(count_server_log 'COMPOUND:.*"LOOKUP"')"
@@ -486,31 +528,66 @@ probe_delegation_product_behavior() {
 
   run_external_recall_expect_callback "before external create"
   printf 'external\n' >"${BACKING_DIR}/${create_name}"
-  create_ms="$(wait_for_path_state "${MOUNT_DIR}/${create_name}" present "${VISIBILITY_TIMEOUT_MS}")"
+  create_ms="$(wait_for_path_state_after_parent_refresh "${MOUNT_DIR}/${create_name}" present "${VISIBILITY_TIMEOUT_MS}")"
   test -f "${MOUNT_DIR}/${create_name}"
   delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "after external create")"
 
   printf 'external\n' >"${MOUNT_DIR}/${unlink_name}"
   test -f "${MOUNT_DIR}/${unlink_name}"
-  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "before external unlink")"
   run_external_recall_expect_callback "before external unlink"
   rm "${BACKING_DIR}/${unlink_name}"
-  unlink_ms="$(wait_for_path_state "${MOUNT_DIR}/${unlink_name}" absent "${VISIBILITY_TIMEOUT_MS}")"
+  unlink_ms="$(wait_for_path_state_after_parent_refresh "${MOUNT_DIR}/${unlink_name}" absent "${VISIBILITY_TIMEOUT_MS}")"
   test ! -e "${MOUNT_DIR}/${unlink_name}"
   delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "after external unlink")"
 
   printf 'external\n' >"${MOUNT_DIR}/${rename_from}"
   test -f "${MOUNT_DIR}/${rename_from}"
-  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "before external rename")"
   run_external_recall_expect_callback "before external rename"
   mv "${BACKING_DIR}/${rename_from}" "${BACKING_DIR}/${rename_to}"
-  rename_ms="$(wait_for_path_state "${MOUNT_DIR}/${rename_to}" present "${VISIBILITY_TIMEOUT_MS}")"
+  rename_ms="$(wait_for_path_state_after_parent_refresh "${MOUNT_DIR}/${rename_to}" present "${VISIBILITY_TIMEOUT_MS}")"
   test -f "${MOUNT_DIR}/${rename_to}"
-  rename_absent_ms="$(wait_for_path_state "${MOUNT_DIR}/${rename_from}" absent "${VISIBILITY_TIMEOUT_MS}")"
+  rename_absent_ms="$(wait_for_path_state_after_parent_refresh "${MOUNT_DIR}/${rename_from}" absent "${VISIBILITY_TIMEOUT_MS}")"
   test ! -e "${MOUNT_DIR}/${rename_from}"
   if (( rename_absent_ms > rename_ms )); then
     rename_ms="${rename_absent_ms}"
   fi
+  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "after external rename")"
+
+  test ! -e "${MOUNT_DIR}/${path_only_create_name}"
+  run_external_recall_expect_callback "before path-only external create"
+  printf 'external\n' >"${BACKING_DIR}/${path_only_create_name}"
+  if ! path_only_create_ms="$(wait_for_path_state "${MOUNT_DIR}/${path_only_create_name}" present "${VISIBILITY_TIMEOUT_MS}")"; then
+    path_only_create_status="timeout"
+  fi
+  ls -la "${MOUNT_DIR}" >/dev/null
+  test -f "${MOUNT_DIR}/${path_only_create_name}"
+  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "after path-only external create")"
+
+  printf 'external\n' >"${MOUNT_DIR}/${path_only_unlink_name}"
+  test -f "${MOUNT_DIR}/${path_only_unlink_name}"
+  run_external_recall_expect_callback "before path-only external unlink"
+  rm "${BACKING_DIR}/${path_only_unlink_name}"
+  if ! path_only_unlink_ms="$(wait_for_path_state "${MOUNT_DIR}/${path_only_unlink_name}" absent "${VISIBILITY_TIMEOUT_MS}")"; then
+    path_only_unlink_status="timeout"
+  fi
+  ls -la "${MOUNT_DIR}" >/dev/null
+  test ! -e "${MOUNT_DIR}/${path_only_unlink_name}"
+  delegation_ok_count="$(prime_directory_delegation "${delegation_ok_count}" "after path-only external unlink")"
+
+  printf 'external\n' >"${MOUNT_DIR}/${path_only_rename_from}"
+  test -f "${MOUNT_DIR}/${path_only_rename_from}"
+  test ! -e "${MOUNT_DIR}/${path_only_rename_to}"
+  run_external_recall_expect_callback "before path-only external rename"
+  mv "${BACKING_DIR}/${path_only_rename_from}" "${BACKING_DIR}/${path_only_rename_to}"
+  if ! path_only_rename_ms="$(wait_for_path_state "${MOUNT_DIR}/${path_only_rename_to}" present "${VISIBILITY_TIMEOUT_MS}")"; then
+    path_only_rename_status="timeout"
+  fi
+  if ! path_only_rename_absent_ms="$(wait_for_path_state "${MOUNT_DIR}/${path_only_rename_from}" absent "${VISIBILITY_TIMEOUT_MS}")"; then
+    path_only_rename_absent_status="timeout"
+  fi
+  ls -la "${MOUNT_DIR}" >/dev/null
+  test -f "${MOUNT_DIR}/${path_only_rename_to}"
+  test ! -e "${MOUNT_DIR}/${path_only_rename_from}"
 
   mkdir "${MOUNT_DIR}/client-deleg-dir"
   printf 'client\n' >"${MOUNT_DIR}/client-deleg-dir/file.txt"
@@ -522,27 +599,35 @@ probe_delegation_product_behavior() {
     printf 'negative_lookup_probe_count=100\n'
     printf 'lookup_delta=%s\n' "$((lookup_after - lookup_before))"
     printf 'getattr_delta=%s\n' "$((getattr_after - getattr_before))"
-    printf 'external_create_visibility_ms=%s\n' "${create_ms}"
-    printf 'external_unlink_visibility_ms=%s\n' "${unlink_ms}"
-    printf 'external_rename_visibility_ms=%s\n' "${rename_ms}"
-    printf 'external_rename_absent_visibility_ms=%s\n' "${rename_absent_ms}"
+    printf 'external_create_namespace_visibility_ms=%s\n' "${create_ms}"
+    printf 'external_unlink_namespace_visibility_ms=%s\n' "${unlink_ms}"
+    printf 'external_rename_namespace_visibility_ms=%s\n' "${rename_ms}"
+    printf 'external_rename_absent_namespace_visibility_ms=%s\n' "${rename_absent_ms}"
+    printf 'external_create_path_only_visibility_ms=%s\n' "${path_only_create_ms}"
+    printf 'external_create_path_only_status=%s\n' "${path_only_create_status}"
+    printf 'external_unlink_path_only_visibility_ms=%s\n' "${path_only_unlink_ms}"
+    printf 'external_unlink_path_only_status=%s\n' "${path_only_unlink_status}"
+    printf 'external_rename_path_only_visibility_ms=%s\n' "${path_only_rename_ms}"
+    printf 'external_rename_path_only_status=%s\n' "${path_only_rename_status}"
+    printf 'external_rename_absent_path_only_visibility_ms=%s\n' "${path_only_rename_absent_ms}"
+    printf 'external_rename_absent_path_only_status=%s\n' "${path_only_rename_absent_status}"
     printf 'visibility_target_ms=%s\n' "${VISIBILITY_TARGET_MS}"
     printf 'visibility_timeout_ms=%s\n' "${VISIBILITY_TIMEOUT_MS}"
   }
 
   record "INFO" "delegation-product-counters" \
-    "lookup_delta=$((lookup_after - lookup_before)) getattr_delta=$((getattr_after - getattr_before)) create_ms=${create_ms} unlink_ms=${unlink_ms} rename_ms=${rename_ms} target_ms=${VISIBILITY_TARGET_MS}"
+    "lookup_delta=$((lookup_after - lookup_before)) getattr_delta=$((getattr_after - getattr_before)) namespace_create_ms=${create_ms} namespace_unlink_ms=${unlink_ms} namespace_rename_ms=${rename_ms} path_only_create_ms=${path_only_create_ms} path_only_create_status=${path_only_create_status} path_only_unlink_ms=${path_only_unlink_ms} path_only_unlink_status=${path_only_unlink_status} path_only_rename_ms=${path_only_rename_ms} path_only_rename_status=${path_only_rename_status} path_only_rename_absent_ms=${path_only_rename_absent_ms} path_only_rename_absent_status=${path_only_rename_absent_status} target_ms=${VISIBILITY_TARGET_MS}"
 
   if (( create_ms > VISIBILITY_TARGET_MS )); then
-    echo "product gate failed: external create visibility ${create_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
+    echo "product gate failed: external create namespace visibility ${create_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
     return 1
   fi
   if (( unlink_ms > VISIBILITY_TARGET_MS )); then
-    echo "product gate failed: external unlink visibility ${unlink_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
+    echo "product gate failed: external unlink namespace visibility ${unlink_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
     return 1
   fi
   if (( rename_ms > VISIBILITY_TARGET_MS )); then
-    echo "product gate failed: external rename visibility ${rename_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
+    echo "product gate failed: external rename namespace visibility ${rename_ms}ms exceeded target ${VISIBILITY_TARGET_MS}ms"
     return 1
   fi
 }

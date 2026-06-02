@@ -99,15 +99,17 @@ impl<F: FileSystem> NfsServer<F> {
         }
     }
 
-    pub(crate) async fn recall_directory_delegations(
+    pub(crate) async fn recall_directory_delegations_excluding(
         &self,
         object: &ServerObject,
+        excluded_clientid: Option<Clientid4>,
     ) -> Result<(), NfsStat4> {
         recall_directory_delegations(
             &self.state,
             &self.backchannels,
             &self.delegation_config,
             object,
+            excluded_clientid,
         )
         .await
     }
@@ -125,6 +127,7 @@ impl<F: FileSystem> NfsServer<F> {
             &self.backchannels,
             &self.delegation_config,
             &ServerObject::Fs(object_id),
+            None,
         )
         .await
         .map_err(recall_status_to_fs_error)
@@ -152,6 +155,7 @@ where
             &self.backchannels,
             &self.delegation_config,
             &ServerObject::Fs(object_id),
+            None,
         )
         .await
         .map_err(recall_status_to_fs_error)
@@ -190,12 +194,15 @@ async fn recall_directory_delegations(
     backchannels: &BackchannelManager,
     delegation_config: &DelegationConfig,
     object: &ServerObject,
+    excluded_clientid: Option<Clientid4>,
 ) -> Result<(), NfsStat4> {
     if !delegation_config.directory_delegations {
         return Ok(());
     }
 
-    let recalls = state.begin_directory_recall(object).await;
+    let recalls = state
+        .begin_directory_recall_excluding(object, excluded_clientid)
+        .await;
     if recalls.is_empty() {
         return Ok(());
     }
