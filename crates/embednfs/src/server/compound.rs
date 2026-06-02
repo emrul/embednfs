@@ -201,7 +201,10 @@ impl<F: FileSystem> NfsServer<F> {
                 self.op_create(request_ctx, args, &mut state.current_fh, sequence_clientid)
                     .await
             }
-            NfsArgop4::Getattr(args) => self.op_getattr(request_ctx, args, &state.current_fh).await,
+            NfsArgop4::Getattr(args) => {
+                self.op_getattr(request_ctx, args, &state.current_fh, state.minorversion)
+                    .await
+            }
             NfsArgop4::Getfh => self.op_getfh(&state.current_fh),
             NfsArgop4::Link(args) => {
                 self.op_link(
@@ -263,7 +266,10 @@ impl<F: FileSystem> NfsServer<F> {
                 )
                 .await
             }
-            NfsArgop4::Readdir(args) => self.op_readdir(request_ctx, args, &state.current_fh).await,
+            NfsArgop4::Readdir(args) => {
+                self.op_readdir(request_ctx, args, &state.current_fh, state.minorversion)
+                    .await
+            }
             NfsArgop4::Readlink => self.op_readlink(request_ctx, &state.current_fh).await,
             NfsArgop4::Remove(args) => {
                 self.op_remove(request_ctx, args, &state.current_fh, sequence_clientid)
@@ -498,12 +504,24 @@ impl<F: FileSystem> NfsServer<F> {
                 NfsResop4::DelegPurge(NfsStat4::Ok)
             }
             NfsArgop4::Verify(vattr) => {
-                self.op_verify(request_ctx, vattr, &state.current_fh, false)
-                    .await
+                self.op_verify(
+                    request_ctx,
+                    vattr,
+                    &state.current_fh,
+                    false,
+                    state.minorversion,
+                )
+                .await
             }
             NfsArgop4::Nverify(vattr) => {
-                self.op_verify(request_ctx, vattr, &state.current_fh, true)
-                    .await
+                self.op_verify(
+                    request_ctx,
+                    vattr,
+                    &state.current_fh,
+                    true,
+                    state.minorversion,
+                )
+                .await
             }
             NfsArgop4::OpenDowngrade(args) => {
                 self.op_open_downgrade(args, state.current_stateid, sequence_clientid)

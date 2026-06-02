@@ -4,7 +4,7 @@
 
 An embeddable NFSv4 server library in Rust. You implement a small filesystem trait; the library handles the wire protocol, sessions, filehandles, locking, and TCP serving over both NFSv4.0 (RFC 7530) and NFSv4.1 (RFC 8881) — the same server speaks both minor versions and lets the client pick.
 
-The primary implementation target is Apple/macOS client compatibility for a localhost FUSE-replacement use case. The macOS in-kernel `mount_nfs(8)` does not advertise minor version 1, so embednfs serves NFSv4.0 on that path; Linux is served via NFSv4.1 where the protocol picks up sessions, the xattr ops (RFC 8276) Linux relies on for extended attributes, and opt-in read-only directory delegations for capable kernel clients.
+The primary implementation target is Apple/macOS client compatibility for a localhost FUSE-replacement use case. The macOS in-kernel `mount_nfs(8)` does not advertise minor version 1, so embednfs serves NFSv4.0 on that path; Linux is served via NFSv4.1 for sessions and opt-in read-only directory delegations, with the RFC 8276 xattr ops exposed on the NFSv4.2 path.
 
 ## Support Boundary
 
@@ -43,9 +43,12 @@ Then mount:
 mkdir -p /tmp/embednfs
 mount_nfs -o vers=4,tcp,port=2049 127.0.0.1:/ /tmp/embednfs
 
-# Linux — vers=4.1 to opt into sessions, xattr ops, and delegation-capable clients.
+# Linux — vers=4.1 to opt into sessions and delegation-capable clients.
 mkdir -p /mnt/embednfs
 mount -t nfs4 -o vers=4.1,proto=tcp,port=2049 127.0.0.1:/ /mnt/embednfs
+
+# Linux xattrs — use the NFSv4.2 path for RFC 8276 xattr ops.
+mount -t nfs4 -o vers=4.2,proto=tcp,port=2049 127.0.0.1:/ /mnt/embednfs
 ```
 
 ## NFSv4.1 Directory Delegations

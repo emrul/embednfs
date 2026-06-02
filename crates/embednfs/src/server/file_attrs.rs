@@ -14,6 +14,7 @@ impl<F: FileSystem> NfsServer<F> {
         attr: &ServerFileAttr,
         request: &Bitmap4,
         fh: &NfsFh4,
+        minorversion: u32,
     ) -> NfsResult<Fattr4> {
         let object = self.state.fh_to_object(fh).ok_or(FsError::Stale)?;
         let stats = if attrs::request_needs_fs_stats(request) {
@@ -27,6 +28,7 @@ impl<F: FileSystem> NfsServer<F> {
             limits: &limits,
             stats: stats.as_ref(),
             capabilities: &capabilities,
+            minorversion,
         };
         Ok(attrs::encode_fattr4(attr, request, fh, &ctx))
     }

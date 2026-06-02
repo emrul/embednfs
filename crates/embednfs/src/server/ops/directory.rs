@@ -305,6 +305,7 @@ impl<F: FileSystem> NfsServer<F> {
         request_ctx: &RequestContext,
         args: &ReaddirArgs4,
         current_fh: &Option<NfsFh4>,
+        minorversion: u32,
     ) -> NfsResop4 {
         let (_, object) = match self.resolve_object(current_fh).await {
             Ok(resolved) => resolved,
@@ -453,6 +454,7 @@ impl<F: FileSystem> NfsServer<F> {
                 limits: &limits,
                 stats: stats.as_ref(),
                 capabilities: &caps,
+                minorversion,
             };
             let entry_fh = self.state.object_to_fh(object);
             let result_entry = Entry4 {

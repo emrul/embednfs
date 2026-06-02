@@ -61,6 +61,7 @@ impl<F: FileSystem> NfsServer<F> {
         request_ctx: &RequestContext,
         args: &GetattrArgs4,
         current_fh: &Option<NfsFh4>,
+        minorversion: u32,
     ) -> NfsResop4 {
         let (fh, object) = match self.resolve_object(current_fh).await {
             Ok(resolved) => resolved,
@@ -69,7 +70,7 @@ impl<F: FileSystem> NfsServer<F> {
 
         match self.build_attr(request_ctx, &object).await {
             Ok(attr) => match self
-                .encode_fattr(request_ctx, &attr, &args.attr_request, &fh)
+                .encode_fattr(request_ctx, &attr, &args.attr_request, &fh, minorversion)
                 .await
             {
                 Ok(fattr) => NfsResop4::Getattr(NfsStat4::Ok, Some(fattr)),
@@ -203,6 +204,7 @@ impl<F: FileSystem> NfsServer<F> {
         client_fattr: &Fattr4,
         current_fh: &Option<NfsFh4>,
         negate: bool,
+        minorversion: u32,
     ) -> NfsResop4 {
         let make_res = |s: NfsStat4| {
             if negate {
@@ -227,7 +229,7 @@ impl<F: FileSystem> NfsServer<F> {
         {
             return make_res(NfsStat4::Inval);
         }
-        let supported = attrs::supported_attrs_bitmap(&self.capabilities());
+        let supported = attrs::supported_attrs_bitmap(&self.capabilities(), minorversion);
         for (word_idx, word) in client_fattr.attrmask.0.iter().enumerate() {
             let supported_word = supported.0.get(word_idx).copied().unwrap_or(0);
             if word & !supported_word != 0 {
@@ -236,7 +238,13 @@ impl<F: FileSystem> NfsServer<F> {
         }
 
         let server_fattr = match self
-            .encode_fattr(request_ctx, &attr, &client_fattr.attrmask, &fh)
+            .encode_fattr(
+                request_ctx,
+                &attr,
+                &client_fattr.attrmask,
+                &fh,
+                minorversion,
+            )
             .await
         {
             Ok(fattr) => fattr,

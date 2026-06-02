@@ -14,6 +14,7 @@ pub(crate) struct AttrEncodingContext<'a> {
     pub limits: &'a FsLimits,
     pub stats: Option<&'a FsStats>,
     pub capabilities: &'a FsCapabilities,
+    pub minorversion: u32,
 }
 
 pub(crate) fn request_needs_fs_stats(request: &Bitmap4) -> bool {
@@ -25,7 +26,7 @@ pub(crate) fn request_needs_fs_stats(request: &Bitmap4) -> bool {
         || request.is_set(FATTR4_SPACE_TOTAL)
 }
 
-pub(crate) fn supported_attrs_bitmap(capabilities: &FsCapabilities) -> Bitmap4 {
+pub(crate) fn supported_attrs_bitmap(capabilities: &FsCapabilities, minorversion: u32) -> Bitmap4 {
     let mut supported = Bitmap4::new();
     for bit in &[
         FATTR4_SUPPORTED_ATTRS,
@@ -83,6 +84,8 @@ pub(crate) fn supported_attrs_bitmap(capabilities: &FsCapabilities) -> Bitmap4 {
     }
     if capabilities.xattrs {
         supported.set(FATTR4_NAMED_ATTR);
+    }
+    if capabilities.xattrs && minorversion >= 2 {
         supported.set(FATTR4_XATTR_SUPPORT);
     }
     supported
@@ -103,7 +106,7 @@ pub(crate) fn encode_fattr4(
     // FATTR4_SUPPORTED_ATTRS (0) - mandatory
     if request.is_set(FATTR4_SUPPORTED_ATTRS) {
         result_bitmap.set(FATTR4_SUPPORTED_ATTRS);
-        let supported = supported_attrs_bitmap(ctx.capabilities);
+        let supported = supported_attrs_bitmap(ctx.capabilities, ctx.minorversion);
         supported.encode(&mut vals);
     }
 
@@ -445,7 +448,7 @@ pub(crate) fn encode_fattr4(
     }
 
     // FATTR4_XATTR_SUPPORT (82)
-    if request.is_set(FATTR4_XATTR_SUPPORT) {
+    if ctx.minorversion >= 2 && request.is_set(FATTR4_XATTR_SUPPORT) {
         result_bitmap.set(FATTR4_XATTR_SUPPORT);
         ctx.capabilities.xattrs.encode(&mut vals);
     }
@@ -636,6 +639,7 @@ mod tests {
             limits: &limits,
             stats: Some(&stats),
             capabilities: &caps,
+            minorversion: 1,
         };
         let fattr = encode_fattr4(&attr, &request, &fh, &ctx);
         let mut src = bytes::Bytes::from(fattr.attr_vals);

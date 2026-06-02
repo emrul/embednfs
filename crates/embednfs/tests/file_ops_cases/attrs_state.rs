@@ -198,6 +198,41 @@ async fn test_getattr_supported_attrs() {
     assert!(supported.is_set(FATTR4_SIZE));
     assert!(supported.is_set(FATTR4_FILEID));
     assert!(supported.is_set(FATTR4_CHANGE));
+    assert!(!supported.is_set(FATTR4_XATTR_SUPPORT));
+}
+
+/// GETATTR for NFSv4.2 `supported_attrs` advertises RFC 8276 xattr support.
+/// Origin: regression coverage for minor-version-specific attribute advertisement.
+/// RFC: RFC 8276 §8.3.
+#[tokio::test]
+async fn test_getattr_supported_attrs_includes_xattr_support_for_v42() {
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let getattr_op = encode_getattr(&[FATTR4_SUPPORTED_ATTRS]);
+    let compound = encode_compound_minor(
+        "getattr-supported-v42",
+        2,
+        &[&seq_op, &rootfh_op, &getattr_op],
+    );
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_GETATTR);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let fattr = Fattr4::decode(&mut resp).unwrap();
+    let mut vals = Bytes::from(fattr.attr_vals);
+    let supported = Bitmap4::decode(&mut vals).unwrap();
+    assert!(supported.is_set(FATTR4_XATTR_SUPPORT));
 }
 
 /// GETATTR on a file returns the file size.
