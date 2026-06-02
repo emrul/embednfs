@@ -43,6 +43,16 @@ impl XdrEncode for ReplyStat {
     }
 }
 
+impl XdrDecode for ReplyStat {
+    fn decode(src: &mut Bytes) -> XdrResult<Self> {
+        match u32::decode(src)? {
+            0 => Ok(ReplyStat::Accepted),
+            1 => Ok(ReplyStat::Denied),
+            v => Err(XdrError::InvalidEnum(v)),
+        }
+    }
+}
+
 /// Accept status in an accepted reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptStat {
@@ -57,6 +67,20 @@ pub enum AcceptStat {
 impl XdrEncode for AcceptStat {
     fn encode(&self, dst: &mut BytesMut) {
         (*self as u32).encode(dst);
+    }
+}
+
+impl XdrDecode for AcceptStat {
+    fn decode(src: &mut Bytes) -> XdrResult<Self> {
+        match u32::decode(src)? {
+            0 => Ok(AcceptStat::Success),
+            1 => Ok(AcceptStat::ProgUnavail),
+            2 => Ok(AcceptStat::ProgMismatch),
+            3 => Ok(AcceptStat::ProcUnavail),
+            4 => Ok(AcceptStat::GarbageArgs),
+            5 => Ok(AcceptStat::SystemErr),
+            v => Err(XdrError::InvalidEnum(v)),
+        }
     }
 }
 
@@ -173,6 +197,19 @@ impl XdrDecode for AuthSysParams {
     }
 }
 
+impl XdrEncode for AuthSysParams {
+    fn encode(&self, dst: &mut BytesMut) {
+        self.stamp.encode(dst);
+        self.machinename.encode(dst);
+        self.uid.encode(dst);
+        self.gid.encode(dst);
+        (self.gids.len() as u32).encode(dst);
+        for gid in &self.gids {
+            gid.encode(dst);
+        }
+    }
+}
+
 /// RPC call header.
 #[derive(Debug, Clone)]
 pub struct RpcCallHeader {
@@ -208,6 +245,55 @@ impl XdrDecode for RpcCallHeader {
             verf,
         })
     }
+}
+
+/// RPC reply header accepted by a remote peer.
+#[derive(Debug, Clone)]
+pub struct RpcAcceptedReply {
+    pub xid: u32,
+    pub verf: OpaqueAuth,
+    pub accept_stat: AcceptStat,
+}
+
+impl XdrDecode for RpcAcceptedReply {
+    fn decode(src: &mut Bytes) -> XdrResult<Self> {
+        let xid = u32::decode(src)?;
+        let msg_type = MsgType::decode(src)?;
+        if msg_type != MsgType::Reply {
+            return Err(XdrError::InvalidEnum(msg_type as u32));
+        }
+        let reply_stat = ReplyStat::decode(src)?;
+        if reply_stat != ReplyStat::Accepted {
+            return Err(XdrError::InvalidEnum(reply_stat as u32));
+        }
+        let verf = OpaqueAuth::decode(src)?;
+        let accept_stat = AcceptStat::decode(src)?;
+        Ok(RpcAcceptedReply {
+            xid,
+            verf,
+            accept_stat,
+        })
+    }
+}
+
+/// Encode an RPC call header.
+pub fn encode_rpc_call(
+    dst: &mut BytesMut,
+    xid: u32,
+    prog: u32,
+    vers: u32,
+    proc_num: u32,
+    cred: &OpaqueAuth,
+    verf: &OpaqueAuth,
+) {
+    xid.encode(dst);
+    MsgType::Call.encode(dst);
+    RPC_VERSION.encode(dst);
+    prog.encode(dst);
+    vers.encode(dst);
+    proc_num.encode(dst);
+    cred.encode(dst);
+    verf.encode(dst);
 }
 
 /// Encode a successful RPC reply header.

@@ -159,6 +159,11 @@ pub const OP_LISTXATTRS: u32 = 74;
 pub const OP_REMOVEXATTR: u32 = 75;
 pub const OP_ILLEGAL: u32 = 10044;
 
+pub const OP_CB_GETATTR: u32 = 3;
+pub const OP_CB_RECALL: u32 = 4;
+pub const OP_CB_SEQUENCE: u32 = 11;
+pub const OP_CB_ILLEGAL: u32 = 10044;
+
 pub const EXCHGID4_FLAG_SUPP_MOVED_REFER: u32 = 0x00000001;
 pub const EXCHGID4_FLAG_SUPP_MOVED_MIGR: u32 = 0x00000002;
 pub const EXCHGID4_FLAG_BIND_PRINC_STATEID: u32 = 0x00000100;

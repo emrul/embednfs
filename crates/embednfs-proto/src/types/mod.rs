@@ -1,11 +1,13 @@
 //! NFSv4.1 protocol types per RFC 8881.
 
 mod basic;
+mod callback;
 mod constants;
 mod operations;
 mod session;
 
 pub use basic::*;
+pub use callback::*;
 pub use constants::*;
 pub use operations::*;
 pub use session::*;
@@ -282,5 +284,112 @@ mod tests {
         for op in payload_ops {
             assert!(op.to_bytes().len() > 8, "missing payload for {op:?}");
         }
+    }
+
+    #[test]
+    fn test_callback_compound_encode_sequence_and_recall() {
+        let mut buf = BytesMut::new();
+        CbCompound4Args {
+            tag: "recall".to_string(),
+            minorversion: 1,
+            callback_ident: 0,
+            argarray: vec![
+                NfsCbArgop4::Sequence(CbSequenceArgs4 {
+                    sessionid: [0x11; 16],
+                    sequenceid: 1,
+                    slotid: 0,
+                    highest_slotid: 0,
+                    cachethis: false,
+                }),
+                NfsCbArgop4::Recall(CbRecallArgs4 {
+                    stateid: Stateid4 {
+                        seqid: 1,
+                        other: [0x22; 12],
+                    },
+                    truncate: false,
+                    fh: NfsFh4(Bytes::from_static(b"fh")),
+                }),
+            ],
+        }
+        .encode(&mut buf);
+
+        let mut bytes = buf.freeze();
+        assert_eq!(String::decode(&mut bytes).unwrap(), "recall");
+        assert_eq!(u32::decode(&mut bytes).unwrap(), 1);
+        assert_eq!(u32::decode(&mut bytes).unwrap(), 0);
+        assert_eq!(u32::decode(&mut bytes).unwrap(), 2);
+        assert_eq!(u32::decode(&mut bytes).unwrap(), OP_CB_SEQUENCE);
+        let _ = CbSequenceArgs4 {
+            sessionid: [0x11; 16],
+            sequenceid: 1,
+            slotid: 0,
+            highest_slotid: 0,
+            cachethis: false,
+        };
+        assert_eq!(bytes.split_to(16), Bytes::from_static(&[0x11; 16]));
+        assert_eq!(u32::decode(&mut bytes).unwrap(), 1);
+        assert_eq!(u32::decode(&mut bytes).unwrap(), 0);
+        assert_eq!(u32::decode(&mut bytes).unwrap(), 0);
+        assert!(!bool::decode(&mut bytes).unwrap());
+        assert_eq!(u32::decode(&mut bytes).unwrap(), 0);
+        assert_eq!(u32::decode(&mut bytes).unwrap(), OP_CB_RECALL);
+        assert_eq!(Stateid4::decode(&mut bytes).unwrap().other, [0x22; 12]);
+        assert!(!bool::decode(&mut bytes).unwrap());
+        assert_eq!(
+            NfsFh4::decode(&mut bytes).unwrap().0,
+            Bytes::from_static(b"fh")
+        );
+    }
+
+    #[test]
+    fn test_callback_compound_result_decode() {
+        let mut buf = BytesMut::new();
+        NfsStat4::Ok.encode(&mut buf);
+        "recall".to_string().encode(&mut buf);
+        2u32.encode(&mut buf);
+        OP_CB_SEQUENCE.encode(&mut buf);
+        NfsStat4::Ok.encode(&mut buf);
+        buf.extend_from_slice(&[0x11; 16]);
+        7u32.encode(&mut buf);
+        0u32.encode(&mut buf);
+        3u32.encode(&mut buf);
+        2u32.encode(&mut buf);
+        OP_CB_RECALL.encode(&mut buf);
+        NfsStat4::Ok.encode(&mut buf);
+
+        let mut bytes = buf.freeze();
+        let decoded = CbCompound4Res::decode(&mut bytes).unwrap();
+        assert_eq!(decoded.status, NfsStat4::Ok);
+        assert_eq!(decoded.tag, "recall");
+        assert_eq!(decoded.resarray.len(), 2);
+        assert_eq!(
+            decoded.resarray[0],
+            NfsCbResop4::Sequence(
+                NfsStat4::Ok,
+                Some(CbSequenceResOk4 {
+                    sessionid: [0x11; 16],
+                    sequenceid: 7,
+                    slotid: 0,
+                    highest_slotid: 3,
+                    target_highest_slotid: 2,
+                })
+            )
+        );
+        assert_eq!(decoded.resarray[1], NfsCbResop4::Recall(NfsStat4::Ok));
+    }
+
+    #[test]
+    fn test_rpc_accepted_reply_decode() {
+        let mut buf = BytesMut::new();
+        99u32.encode(&mut buf);
+        crate::rpc::MsgType::Reply.encode(&mut buf);
+        crate::rpc::ReplyStat::Accepted.encode(&mut buf);
+        crate::rpc::OpaqueAuth::null().encode(&mut buf);
+        crate::rpc::AcceptStat::Success.encode(&mut buf);
+
+        let mut bytes = buf.freeze();
+        let reply = crate::rpc::RpcAcceptedReply::decode(&mut bytes).unwrap();
+        assert_eq!(reply.xid, 99);
+        assert_eq!(reply.accept_stat, crate::rpc::AcceptStat::Success);
     }
 }
