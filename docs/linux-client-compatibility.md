@@ -1,6 +1,6 @@
 # Linux NFSv4.1 Client Compatibility Design Notes
 
-This note identifies where `embednfs` may differ from Linux NFS client expectations. It is a planning document, not a claim of validated Linux support.
+This note identifies where `embednfs` may differ from Linux NFS client expectations. It is a planning and validation document, not a claim of exhaustive Linux support.
 
 ## Sources
 
@@ -24,7 +24,7 @@ The local implementation points referenced below are current as of this reposito
 
 ## Mount Baseline
 
-Use an explicit NFSv4.1 mount. Linux will otherwise try newer minor versions first, and this library intentionally rejects `minorversion != 1`.
+Use an explicit NFSv4.1 mount for the compatibility path described here. Linux will otherwise try newer minor versions first, and the v4.1 path is the one covered by the kernel smoke harness.
 
 ```bash
 mount -t nfs4 -o vers=4.1,proto=tcp,port=2049,sec=sys 127.0.0.1:/ /mnt/embednfs
@@ -43,11 +43,11 @@ The Linux `nfs(5)` behavior to account for:
 - `vers=4.1` is equivalent to `vers=4,minorversion=1`.
 - NFSv4 defaults to TCP.
 - If `port` is omitted, Linux uses TCP port 2049 for NFSv4 without rpcbind. A custom port must be explicit.
-- If `vers` is omitted, Linux may try 4.2 before 4.1, which will correctly fail against `embednfs`.
+- If `vers` is omitted, Linux may try 4.2 before 4.1. That exercises a different compatibility path than the v4.1 smoke harness described here.
 
 ## Current Compatibility Surface
 
-`embednfs` already implements the core operations Linux needs for a basic NFSv4.1 mount and file workflow:
+`embednfs` implements the core operations Linux needs for a basic NFSv4.1 mount and file workflow:
 
 - sessions: `EXCHANGE_ID`, `CREATE_SESSION`, `SEQUENCE`, `BIND_CONN_TO_SESSION`, `DESTROY_SESSION`, `DESTROY_CLIENTID`
 - namespace: `PUTROOTFH`, `PUTFH`, `GETFH`, `LOOKUP`, `LOOKUPP`, `SAVEFH`, `RESTOREFH`
@@ -59,6 +59,59 @@ The Linux `nfs(5)` behavior to account for:
 - recovery/state cleanup: `RECLAIM_COMPLETE`, `TEST_STATEID`, `FREE_STATEID`
 
 The highest-value Linux path to validate first is therefore not broad protocol coverage. It is whether Linux accepts this server's exact session negotiation, auth flavor advertisement, root filehandle probing, and advertised attributes.
+
+## Validated Linux Smoke Results
+
+Validation on 2026-06-02 used the Linux kernel client against `embednfsd` from
+commit `1e2f023` on host `emrul@192.168.1.140`.
+
+- Kernel: `6.17.0-14-generic`
+- nfs-utils: `mount.nfs (linux nfs-utils 2.6.4)`
+- Mount options: `vers=4.1,proto=tcp,port=12049,sec=sys`
+- Harness: `scripts/smoke-linux-nfs41.sh`
+
+Two runs passed the mount, metadata, basic I/O, large I/O, namespace mutation,
+link, lock, and server-restart-recovery probes:
+
+```bash
+ARTIFACT_DIR=/tmp/embednfs-linux-smoke-disabled-1e2f023 \
+  SERVER_CARGO_TARGET_DIR=/tmp/embednfs-phase5-target \
+  DIRECTORY_DELEGATIONS=0 \
+  ./scripts/smoke-linux-nfs41.sh
+
+ARTIFACT_DIR=/tmp/embednfs-linux-smoke-deleg-1e2f023 \
+  SERVER_CARGO_TARGET_DIR=/tmp/embednfs-phase5-target \
+  DIRECTORY_DELEGATIONS=1 \
+  RECALL_TIMEOUT_MS=1000 \
+  ./scripts/smoke-linux-nfs41.sh
+```
+
+The xattr step was skipped because `setfattr` and `getfattr` were not installed
+on the host. That skip is not a protocol result.
+
+With directory delegations enabled, this kernel did not send
+`GET_DIR_DELEGATION`, `BACKCHANNEL_CTL`, callback traffic, or `DELEGRETURN`.
+The delegation trace summary was:
+
+```text
+gdd=0 gdd_ok=0 recall=0 backchannel_ctl=0
+```
+
+The observed NFS module parameters did not include a directory-delegation client
+knob. Relevant callback/session parameters were:
+
+```text
+callback_nr_threads=0
+callback_tcpport=0
+max_session_cb_slots=16
+max_session_slots=64
+send_implementation_id=1
+```
+
+This proves that enabling `DelegationConfig::directory_delegations` does not
+regress this Linux v4.1 smoke workflow. It does not prove that the Linux kernel
+accepts or uses granted directory delegations, because this host never requested
+one.
 
 ## Likely Breakage Points
 
@@ -125,13 +178,14 @@ Design direction:
 
 - Capture the exact GETATTR bitmaps during mount and basic `stat`, `ls`, `touch`, `cp`, `mv`, `rm`.
 - Add compatibility tests around directory change/mtime invalidation because stale Linux dcache behavior will look like client bugs but usually means server metadata is not advancing.
-- Treat Linux xattrs as a separate feature from macOS named attributes. Plan no Linux xattr support until the specific operation path is identified.
+- Treat Linux xattrs as a separate feature from macOS named attributes. They use the RFC 8276 operation path, not macOS-style `OPENATTR` named-attribute directories.
 
 Current validation result:
 
-- Linux `setfattr` on a mounted `embednfs` export fails locally with `EOPNOTSUPP`.
-- Enabling the server's NFSv4.1 `OPENATTR`/named-attribute backend does not change this; debug COMPOUND logs show no `OPENATTR` or xattr-like v4.1 operation is sent for `setfattr`.
-- Linux user xattrs use the NFSv4.2 extended-attribute operations from RFC 8276 (`GETXATTR`, `SETXATTR`, `LISTXATTR`, `REMOVEXATTR`), which are outside this project's current strict NFSv4.1 scope.
+- Earlier Linux `setfattr` validation against the v4.1 mount path failed locally with `EOPNOTSUPP`.
+- Enabling the server's `OPENATTR`/named-attribute backend does not change that v4.1 result; debug COMPOUND logs showed no `OPENATTR` operation for `setfattr`.
+- The current tree implements the RFC 8276 NFSv4.2 xattr operations (`GETXATTR`, `SETXATTR`, `LISTXATTR`, `REMOVEXATTR`) and covers them with protocol-level integration tests.
+- The 2026-06-02 Linux kernel smoke skipped xattrs because `setfattr` and `getfattr` were not installed on the host, so kernel-client xattr interoperability remains unvalidated by that run.
 
 ### 5. Owner/Group Identity Mapping
 
@@ -177,16 +231,18 @@ Design direction:
 
 ### 8. Unsupported Optional Features
 
-`embednfs` intentionally returns `NFS4ERR_NOTSUPP` for pNFS layouts, directory delegation, device info/list, and wanted delegations. That should be fine for a non-pNFS localhost server.
+`embednfs` intentionally returns `NFS4ERR_NOTSUPP` for pNFS layouts, device info/list, wanted delegations, and file delegations. Directory delegations are implemented only as an opt-in NFSv4.1 feature.
 
 Risk:
 
 - Linux may probe optional features. Correct `NOTSUPP` is acceptable; malformed decoding or wrong COMPOUND positioning is not.
 - Delegation-related no-op success for `DELEGPURGE` and `DELEGRETURN` should be revisited. If the server never grants delegations, success is usually harmless, but strict clients may expect `BAD_STATEID` or `NOTSUPP` for invalid delegation state.
+- Directory delegation interoperability is not proven until a Linux kernel or other real client sends `GET_DIR_DELEGATION` and returns or revokes the state through the callback path.
 
 Design direction:
 
-- Keep pNFS and delegation support out of scope for first Linux support.
+- Keep pNFS, file delegations, and wanted delegations out of scope for first Linux support.
+- Keep directory delegations disabled by default and validate with a client that actually sends `GET_DIR_DELEGATION` before enabling them in production.
 - Prefer explicit, RFC-consistent negative responses over no-op success where state-bearing arguments are invalid.
 
 ## Proposed Validation Matrix
@@ -198,6 +254,13 @@ The executable first-pass harness is `scripts/smoke-linux-nfs41.sh`. Run it insi
 ```
 
 It starts `embednfsd`, mounts `127.0.0.1:/` with NFSv4.1, writes per-probe logs under `/tmp/embednfs-linux-smoke-*`, and emits a tab-separated summary.
+
+Useful harness controls:
+
+- `DIRECTORY_DELEGATIONS=1` enables `DelegationConfig::directory_delegations` in `embednfsd`.
+- `RECALL_TIMEOUT_MS=1000` sets the delegation recall timeout for the daemon.
+- `SERVER_RUST_LOG=embednfs=debug,embednfsd=info` captures COMPOUND and delegation trace evidence.
+- `SERVER_CARGO_TARGET_DIR=/tmp/embednfs-phase5-target` reuses build artifacts across repeated VM runs.
 
 ### Phase 1: Mount and Metadata
 
@@ -239,26 +302,31 @@ Expected result: no indefinite recovery loops; state errors trigger expected Lin
 ### Phase 5: Optional Feature Probes
 
 - inspect traffic for `BACKCHANNEL_CTL`, layout ops, `GETDEVICEINFO`, `WANT_DELEGATION`, and xattr paths.
+- run the harness once with `DIRECTORY_DELEGATIONS=0` and once with `DIRECTORY_DELEGATIONS=1`.
+- inspect the `delegation-trace` summary for `GET_DIR_DELEGATION`, successful grants, `CB_RECALL`, `DELEGRETURN`, and `BACKCHANNEL_CTL`.
 - run with `nconnect`/`max_connect` options only after single-connection behavior is stable.
 
-Expected result: optional probes either do not occur or receive RFC-consistent responses that Linux tolerates.
+Expected result: optional probes either do not occur or receive RFC-consistent responses that Linux tolerates. If a client sends `GET_DIR_DELEGATION`, successful interoperability requires a grant or documented `GDD4_UNAVAIL` behavior, working recall, and clear evidence of whether Linux expects a later `DELEGRETURN`.
 
 ## Initial Code Change Candidates
 
 These are candidates only; implement them after a Linux mount trace confirms the actual failure mode.
 
 1. Return `NFS4ERR_ENCR_ALG_UNSUPP` in the SSV negotiation path when RFC/Linux behavior calls for it, instead of generic `NOTSUPP`.
-2. Implement a minimal `BACKCHANNEL_CTL` compatibility response if Linux sends it during normal `sec=sys` mounts.
+2. Implement a minimal `BACKCHANNEL_CTL` compatibility response if Linux sends it during normal `sec=sys` mounts. The 2026-06-02 smoke host did not send it.
 3. Separate session `maxoperations` from slot-count constants and verify Linux accepts the negotiated values.
 4. Make owner/group `SETATTR` parsing fail with `NFS4ERR_BADOWNER` when an explicit owner/group change cannot be mapped.
-5. Add a Linux kernel-client smoke script gated on root privileges, separate from the no-root RPC integration tests.
+5. Extend the Linux kernel-client smoke script when a client that sends `GET_DIR_DELEGATION` is available.
 6. Add docs stating Linux support requires `vers=4.1,proto=tcp,sec=sys` and currently supports only the `/` export path.
 
 ## Open Questions
 
-- Does Linux send `BACKCHANNEL_CTL` to this server during a normal `sec=sys` v4.1 mount?
+- Does a target Linux kernel send `GET_DIR_DELEGATION` to this server under any mount/module setting? The 2026-06-02 host did not.
+- Does Linux send `BACKCHANNEL_CTL` to this server during a normal `sec=sys` v4.1 mount? The 2026-06-02 host did not.
+- Which notification and attribute bitmaps does Linux require in a successful `GET_DIR_DELEGATION` response?
+- Does Linux expect `DELEGRETURN` after successful `CB_RECALL`, or is callback success sufficient for directory delegations?
 - Does Linux tolerate the current `SECINFO` order of `AUTH_SYS` then `AUTH_NONE`, or should `AUTH_NONE` be removed from the default advertised list?
 - Which exact fsinfo/pathconf attributes does Linux require to set sane `rsize`, `wsize`, name length, and cache behavior?
-- Does Linux ever issue `OPENATTR` against this server, or does Linux xattr support require newer non-OPENATTR NFS operations? Current finding: Linux `setfattr` does not issue `OPENATTR`; user xattrs require NFSv4.2 RFC 8276 operations.
+- Does Linux kernel-client xattr interop pass against the current RFC 8276 implementation when mounted with the required minor version and `setfattr`/`getfattr` are available? Current finding: v4.1 `setfattr` did not issue `OPENATTR`, and the 2026-06-02 smoke skipped xattrs.
 - Are current directory `change` and `mtime` updates sufficient for Linux dentry-cache invalidation across all backend implementations?
 - Should `server_owner`/`server_scope` include per-instance identity to avoid accidental Linux session trunking across multiple localhost servers?
