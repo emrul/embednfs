@@ -141,7 +141,8 @@ pub(super) enum ClientLeaseState {
 pub(super) struct SessionState {
     pub clientid: Clientid4,
     pub slots: Vec<SlotState>,
-    pub connections: HashSet<u64>,
+    pub fore_connections: HashSet<u64>,
+    pub back_connections: HashSet<u64>,
     pub backchannel: Option<BackchannelState>,
 }
 

@@ -209,7 +209,7 @@ async fn test_bind_conn_to_session_basic() {
     let mut stream = connect(port).await;
     let sessionid = setup_session(&mut stream).await;
 
-    let bind_op = encode_bind_conn_to_session(&sessionid, 0);
+    let bind_op = encode_bind_conn_to_session(&sessionid, CDFC4_FORE);
     let compound = encode_compound("bind-conn", &[&bind_op]);
     let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
     parse_rpc_reply(&mut resp);
@@ -220,6 +220,36 @@ async fn test_bind_conn_to_session_basic() {
     let (opnum, op_status) = parse_op_header(&mut resp);
     assert_eq!(opnum, OP_BIND_CONN_TO_SESSION);
     assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (bound_sessionid, dir, rdma) = parse_bind_conn_to_session_res(&mut resp);
+    assert_eq!(bound_sessionid, sessionid);
+    assert_eq!(dir, CDFS4_FORE);
+    assert!(!rdma);
+}
+
+/// BIND_CONN_TO_SESSION honors a backchannel direction request.
+/// Origin: RFC 8881 §18.34.3 direction negotiation.
+/// RFC: RFC 8881 §18.34.3.
+#[tokio::test]
+async fn test_bind_conn_to_session_backchannel_direction() {
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session_with_callback(&mut stream, 0x4000_2000).await;
+
+    let bind_op = encode_bind_conn_to_session(&sessionid, CDFC4_BACK);
+    let compound = encode_compound("bind-back", &[&bind_op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_BIND_CONN_TO_SESSION);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (bound_sessionid, dir, rdma) = parse_bind_conn_to_session_res(&mut resp);
+    assert_eq!(bound_sessionid, sessionid);
+    assert_eq!(dir, CDFS4_BACK);
+    assert!(!rdma);
 }
 
 /// BIND_CONN_TO_SESSION with an unknown session returns `NFS4ERR_BADSESSION`.
@@ -231,7 +261,7 @@ async fn test_bind_conn_to_session_bad_session() {
     let mut stream = connect(port).await;
 
     let fake_session = [0xBBu8; 16];
-    let bind_op = encode_bind_conn_to_session(&fake_session, 0);
+    let bind_op = encode_bind_conn_to_session(&fake_session, CDFC4_FORE);
     let compound = encode_compound("bind-bad", &[&bind_op]);
     let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
     parse_rpc_reply(&mut resp);

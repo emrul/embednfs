@@ -89,11 +89,25 @@ pub fn encode_create_session(clientid: u64, seq: u32) -> Vec<u8> {
 }
 
 pub fn encode_create_session_with_callback(clientid: u64, seq: u32, cb_program: u32) -> Vec<u8> {
+    let flags = if cb_program == 0 {
+        0
+    } else {
+        CREATE_SESSION4_FLAG_CONN_BACK_CHAN
+    };
+    encode_create_session_with_callback_flags(clientid, seq, cb_program, flags)
+}
+
+pub fn encode_create_session_with_callback_flags(
+    clientid: u64,
+    seq: u32,
+    cb_program: u32,
+    flags: u32,
+) -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_CREATE_SESSION.encode(&mut buf);
     clientid.encode(&mut buf);
     seq.encode(&mut buf);
-    0u32.encode(&mut buf);
+    flags.encode(&mut buf);
 
     0u32.encode(&mut buf);
     1_048_576u32.encode(&mut buf);

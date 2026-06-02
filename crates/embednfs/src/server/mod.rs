@@ -4,6 +4,7 @@ use bytes::{Bytes, BytesMut};
 /// This is the core of the NFS server. It receives COMPOUND requests,
 /// dispatches each operation, and builds the COMPOUND response.
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -131,6 +132,36 @@ pub struct NfsServer<F: FileSystem> {
     backchannels: Arc<backchannel::BackchannelManager>,
 }
 
+/// Cloneable control handle for a running [`NfsServer`].
+///
+/// Keep this handle before calling [`NfsServer::serve`] or [`NfsServer::listen`]
+/// when an embedder needs to trigger server-side actions, such as recalling
+/// directory delegations before applying namespace changes outside the NFS
+/// request path.
+pub struct NfsServerControl<H>
+where
+    H: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    state: Arc<StateManager>,
+    handle_to_object: Arc<RwLock<HashMap<H, ObjectId>>>,
+    delegation_config: DelegationConfig,
+    backchannels: Arc<backchannel::BackchannelManager>,
+}
+
+impl<H> Clone for NfsServerControl<H>
+where
+    H: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            handle_to_object: self.handle_to_object.clone(),
+            delegation_config: self.delegation_config.clone(),
+            backchannels: self.backchannels.clone(),
+        }
+    }
+}
+
 impl<F: FileSystem> NfsServer<F> {
     /// Creates a builder for a new server.
     pub fn builder(fs: F) -> NfsServerBuilder<F> {
@@ -144,6 +175,16 @@ impl<F: FileSystem> NfsServer<F> {
     /// Create a new NFS server with the given filesystem.
     pub fn new(fs: F) -> Self {
         Self::builder(fs).build()
+    }
+
+    /// Returns a cloneable handle for controlling this server after it starts.
+    pub fn control_handle(&self) -> NfsServerControl<F::Handle> {
+        NfsServerControl {
+            state: self.state.clone(),
+            handle_to_object: self.handle_to_object.clone(),
+            delegation_config: self.delegation_config.clone(),
+            backchannels: self.backchannels.clone(),
+        }
     }
 
     /// Start listening on the given address.

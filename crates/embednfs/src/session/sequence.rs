@@ -54,7 +54,7 @@ impl StateManager {
             let Some(session) = inner.sessions.get_mut(&args.sessionid) else {
                 return SequenceReplay::Error(NfsStat4::BadSession);
             };
-            let _ = session.connections.insert(connection_id);
+            let _ = session.fore_connections.insert(connection_id);
             return SequenceReplay::StatusOnly(Self::sequence_res(session, args, status_flags));
         }
         let status_flags = client.status_flags;
@@ -63,7 +63,7 @@ impl StateManager {
             let Some(session) = inner.sessions.get_mut(&args.sessionid) else {
                 return SequenceReplay::Error(NfsStat4::BadSession);
             };
-            let _ = session.connections.insert(connection_id);
+            let _ = session.fore_connections.insert(connection_id);
             let slot = &mut session.slots[slot_idx];
             let retry_seq = slot.sequence_id.wrapping_sub(1);
 

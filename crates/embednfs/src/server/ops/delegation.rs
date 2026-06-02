@@ -1,3 +1,4 @@
+use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use embednfs_proto::*;
@@ -6,10 +7,12 @@ use tracing::debug;
 
 use crate::fs::{FileSystem, FsError, FsResult, RequestContext};
 use crate::internal::{ServerFileType, ServerObject};
-use crate::session::{CallbackTarget, DirectoryDelegationGrant, DirectoryDelegationRecall};
+use crate::session::{
+    CallbackTarget, DirectoryDelegationGrant, DirectoryDelegationRecall, StateManager,
+};
 
-use super::super::NfsServer;
-use super::super::backchannel::{CallbackError, CallbackRequest};
+use super::super::backchannel::{BackchannelManager, CallbackError, CallbackRequest};
+use super::super::{DelegationConfig, NfsServer, NfsServerControl};
 
 impl<F: FileSystem> NfsServer<F> {
     pub(crate) async fn op_get_dir_delegation(
@@ -93,23 +96,13 @@ impl<F: FileSystem> NfsServer<F> {
         &self,
         object: &ServerObject,
     ) -> Result<(), NfsStat4> {
-        if !self.delegation_config.directory_delegations {
-            return Ok(());
-        }
-
-        let recalls = self.state.begin_directory_recall(object).await;
-        if recalls.is_empty() {
-            return Ok(());
-        }
-
-        let fh = self.state.object_to_fh(object);
-        for recall in &recalls {
-            if recall.send_callback {
-                self.send_directory_recall(recall, &fh).await?;
-            }
-        }
-
-        self.wait_for_recalled_delegations(&recalls).await
+        recall_directory_delegations(
+            &self.state,
+            &self.backchannels,
+            &self.delegation_config,
+            object,
+        )
+        .await
     }
 
     /// Recall directory delegations for an exported backend directory handle.
@@ -120,154 +113,224 @@ impl<F: FileSystem> NfsServer<F> {
         let Some(object_id) = self.handle_to_object.read().await.get(handle).copied() else {
             return Ok(());
         };
-        self.recall_directory_delegations(&ServerObject::Fs(object_id))
-            .await
-            .map_err(Self::recall_status_to_fs_error)
+        recall_directory_delegations(
+            &self.state,
+            &self.backchannels,
+            &self.delegation_config,
+            &ServerObject::Fs(object_id),
+        )
+        .await
+        .map_err(recall_status_to_fs_error)
     }
 
     async fn has_callback_path(&self, clientid: Clientid4) -> bool {
-        self.state
-            .callback_connection_ids(clientid)
-            .await
-            .into_iter()
-            .any(|connection_id| self.backchannels.has_connection(connection_id))
+        has_callback_path(&self.state, &self.backchannels, clientid).await
+    }
+}
+
+impl<H> NfsServerControl<H>
+where
+    H: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    /// Recalls directory delegations for an exported backend directory handle.
+    ///
+    /// Unknown handles are treated as a no-op because no NFS client can hold
+    /// a delegation for an object that has not been exposed by this server.
+    pub async fn recall_directory(&self, handle: &H) -> FsResult<()> {
+        let Some(object_id) = self.handle_to_object.read().await.get(handle).copied() else {
+            return Ok(());
+        };
+        recall_directory_delegations(
+            &self.state,
+            &self.backchannels,
+            &self.delegation_config,
+            &ServerObject::Fs(object_id),
+        )
+        .await
+        .map_err(recall_status_to_fs_error)
+    }
+}
+
+async fn has_callback_path(
+    state: &StateManager,
+    backchannels: &BackchannelManager,
+    clientid: Clientid4,
+) -> bool {
+    state
+        .callback_connection_ids(clientid)
+        .await
+        .into_iter()
+        .any(|connection_id| backchannels.has_connection(connection_id))
+}
+
+async fn next_callback_target(
+    state: &StateManager,
+    backchannels: &BackchannelManager,
+    clientid: Clientid4,
+) -> Option<CallbackTarget> {
+    for connection_id in state.callback_connection_ids(clientid).await {
+        if backchannels.has_connection(connection_id)
+            && let Some(target) = state.next_callback_target_on(clientid, connection_id).await
+        {
+            return Some(target);
+        }
+    }
+    None
+}
+
+async fn recall_directory_delegations(
+    state: &StateManager,
+    backchannels: &BackchannelManager,
+    delegation_config: &DelegationConfig,
+    object: &ServerObject,
+) -> Result<(), NfsStat4> {
+    if !delegation_config.directory_delegations {
+        return Ok(());
     }
 
-    async fn next_callback_target(&self, clientid: Clientid4) -> Option<CallbackTarget> {
-        for connection_id in self.state.callback_connection_ids(clientid).await {
-            if self.backchannels.has_connection(connection_id)
-                && let Some(target) = self
-                    .state
-                    .next_callback_target_on(clientid, connection_id)
-                    .await
-            {
-                return Some(target);
+    let recalls = state.begin_directory_recall(object).await;
+    if recalls.is_empty() {
+        return Ok(());
+    }
+
+    let fh = state.object_to_fh(object);
+    for recall in &recalls {
+        if recall.send_callback
+            && let Err(status) =
+                send_directory_recall(state, backchannels, delegation_config, recall, &fh).await
+        {
+            debug!(
+                "directory delegation recall callback failed for client {}: {status:?}",
+                recall.clientid
+            );
+            if let Err(revoke_status) = state.revoke_recallable_delegation(&recall.stateid).await {
+                debug!("delegation revoke after callback failure failed: {revoke_status:?}");
             }
         }
-        None
     }
 
-    async fn send_directory_recall(
-        &self,
-        recall: &DirectoryDelegationRecall,
-        fh: &NfsFh4,
-    ) -> Result<(), NfsStat4> {
-        let target = self
-            .next_callback_target(recall.clientid)
-            .await
-            .ok_or(NfsStat4::CbPathDown)?;
-        let response = self
-            .backchannels
-            .send_callback(CallbackRequest {
-                connection_id: target.connection_id,
-                cb_program: target.cb_program,
-                auth: target.auth,
-                timeout: self.delegation_config.recall_timeout,
-                args: CbCompound4Args {
-                    tag: "recall".into(),
-                    minorversion: 1,
-                    callback_ident: 0,
-                    argarray: vec![
-                        NfsCbArgop4::Sequence(CbSequenceArgs4 {
-                            sessionid: target.sessionid,
-                            sequenceid: target.sequenceid,
-                            slotid: 0,
-                            highest_slotid: target.highest_slotid,
-                            cachethis: false,
-                        }),
-                        NfsCbArgop4::Recall(CbRecallArgs4 {
-                            stateid: recall.stateid,
-                            truncate: false,
-                            fh: fh.clone(),
-                        }),
-                    ],
-                },
-            })
-            .await
-            .map_err(Self::callback_error_status)?;
+    wait_for_recalled_delegations(state, delegation_config, &recalls).await
+}
 
-        Self::validate_recall_response(&response)
-    }
+async fn send_directory_recall(
+    state: &StateManager,
+    backchannels: &BackchannelManager,
+    delegation_config: &DelegationConfig,
+    recall: &DirectoryDelegationRecall,
+    fh: &NfsFh4,
+) -> Result<(), NfsStat4> {
+    let target = next_callback_target(state, backchannels, recall.clientid)
+        .await
+        .ok_or(NfsStat4::CbPathDown)?;
+    let response = backchannels
+        .send_callback(CallbackRequest {
+            connection_id: target.connection_id,
+            cb_program: target.cb_program,
+            auth: target.auth,
+            timeout: delegation_config.recall_timeout,
+            args: CbCompound4Args {
+                tag: "recall".into(),
+                minorversion: 1,
+                callback_ident: 0,
+                argarray: vec![
+                    NfsCbArgop4::Sequence(CbSequenceArgs4 {
+                        sessionid: target.sessionid,
+                        sequenceid: target.sequenceid,
+                        slotid: 0,
+                        highest_slotid: target.highest_slotid,
+                        cachethis: false,
+                    }),
+                    NfsCbArgop4::Recall(CbRecallArgs4 {
+                        stateid: recall.stateid,
+                        truncate: false,
+                        fh: fh.clone(),
+                    }),
+                ],
+            },
+        })
+        .await
+        .map_err(callback_error_status)?;
 
-    async fn wait_for_recalled_delegations(
-        &self,
-        recalls: &[DirectoryDelegationRecall],
-    ) -> Result<(), NfsStat4> {
-        let deadline = Instant::now() + self.delegation_config.recall_timeout;
-        let mut outstanding: Vec<Stateid4> = recalls.iter().map(|recall| recall.stateid).collect();
+    validate_recall_response(&response)
+}
 
-        loop {
-            let mut remaining = Vec::with_capacity(outstanding.len());
-            for stateid in outstanding {
-                if !self.state.delegation_recall_complete(&stateid).await {
-                    remaining.push(stateid);
+async fn wait_for_recalled_delegations(
+    state: &StateManager,
+    delegation_config: &DelegationConfig,
+    recalls: &[DirectoryDelegationRecall],
+) -> Result<(), NfsStat4> {
+    let deadline = Instant::now() + delegation_config.recall_timeout;
+    let mut outstanding: Vec<Stateid4> = recalls.iter().map(|recall| recall.stateid).collect();
+
+    loop {
+        let mut remaining = Vec::with_capacity(outstanding.len());
+        for stateid in outstanding {
+            if !state.delegation_recall_complete(&stateid).await {
+                remaining.push(stateid);
+            }
+        }
+        if remaining.is_empty() {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            for stateid in &remaining {
+                if let Err(status) = state.revoke_recallable_delegation(stateid).await {
+                    debug!("delegation revoke after recall timeout failed: {status:?}");
                 }
             }
-            if remaining.is_empty() {
-                return Ok(());
-            }
+            return Ok(());
+        }
 
-            if Instant::now() >= deadline {
-                for stateid in &remaining {
-                    if let Err(status) = self.state.revoke_recallable_delegation(stateid).await {
-                        debug!("delegation revoke after recall timeout failed: {status:?}");
-                    }
-                }
-                return Ok(());
-            }
-
-            outstanding = remaining;
-            sleep(
-                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
-            )
+        outstanding = remaining;
+        sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())))
             .await;
-        }
+    }
+}
+
+fn callback_error_status(error: CallbackError) -> NfsStat4 {
+    match error {
+        CallbackError::Timeout => NfsStat4::Delay,
+        CallbackError::NoConnection
+        | CallbackError::SendFailed
+        | CallbackError::RpcRejected(_)
+        | CallbackError::BadReply(_) => NfsStat4::CbPathDown,
+    }
+}
+
+fn validate_recall_response(response: &CbCompound4Res) -> Result<(), NfsStat4> {
+    if response.status != NfsStat4::Ok {
+        return Err(response.status);
     }
 
-    fn callback_error_status(error: CallbackError) -> NfsStat4 {
-        match error {
-            CallbackError::Timeout => NfsStat4::Delay,
-            CallbackError::NoConnection
-            | CallbackError::SendFailed
-            | CallbackError::RpcRejected(_)
-            | CallbackError::BadReply(_) => NfsStat4::CbPathDown,
-        }
-    }
-
-    fn validate_recall_response(response: &CbCompound4Res) -> Result<(), NfsStat4> {
-        if response.status != NfsStat4::Ok {
-            return Err(response.status);
-        }
-
-        let mut saw_recall = false;
-        for op in &response.resarray {
-            match op {
-                NfsCbResop4::Sequence(status, _) if *status != NfsStat4::Ok => {
-                    return Err(*status);
-                }
-                NfsCbResop4::Sequence(_, _) => {}
-                NfsCbResop4::Recall(status) if *status == NfsStat4::Ok => {
-                    saw_recall = true;
-                }
-                NfsCbResop4::Recall(status) => return Err(*status),
+    let mut saw_recall = false;
+    for op in &response.resarray {
+        match op {
+            NfsCbResop4::Sequence(status, _) if *status != NfsStat4::Ok => {
+                return Err(*status);
             }
-        }
-
-        if saw_recall {
-            Ok(())
-        } else {
-            Err(NfsStat4::Serverfault)
+            NfsCbResop4::Sequence(_, _) => {}
+            NfsCbResop4::Recall(status) if *status == NfsStat4::Ok => {
+                saw_recall = true;
+            }
+            NfsCbResop4::Recall(status) => return Err(*status),
         }
     }
 
-    fn recall_status_to_fs_error(status: NfsStat4) -> FsError {
-        match status {
-            NfsStat4::Access => FsError::AccessDenied,
-            NfsStat4::Perm => FsError::PermissionDenied,
-            NfsStat4::Badhandle | NfsStat4::Stale => FsError::Stale,
-            NfsStat4::Notsupp => FsError::Unsupported,
-            NfsStat4::Delay | NfsStat4::CbPathDown => FsError::Io,
-            _ => FsError::ServerFault,
-        }
+    if saw_recall {
+        Ok(())
+    } else {
+        Err(NfsStat4::Serverfault)
+    }
+}
+
+fn recall_status_to_fs_error(status: NfsStat4) -> FsError {
+    match status {
+        NfsStat4::Access => FsError::AccessDenied,
+        NfsStat4::Perm => FsError::PermissionDenied,
+        NfsStat4::Badhandle | NfsStat4::Stale => FsError::Stale,
+        NfsStat4::Notsupp => FsError::Unsupported,
+        NfsStat4::Delay | NfsStat4::CbPathDown => FsError::Io,
+        _ => FsError::ServerFault,
     }
 }

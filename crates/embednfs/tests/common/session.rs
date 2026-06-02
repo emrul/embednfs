@@ -1,13 +1,15 @@
 use tokio::net::TcpStream;
 
-use embednfs_proto::{NfsStat4, OP_CREATE_SESSION, OP_EXCHANGE_ID};
+use embednfs_proto::{
+    CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NfsStat4, OP_CREATE_SESSION, OP_EXCHANGE_ID,
+};
 
 use super::encode::{
     encode_compound, encode_create_session, encode_create_session_with_callback, encode_exchange_id,
 };
 use super::parse::{
-    parse_compound_header, parse_create_session_res, parse_op_header, parse_rpc_reply_fields,
-    skip_exchange_id_res,
+    parse_compound_header, parse_create_session_res, parse_create_session_res_full,
+    parse_op_header, parse_rpc_reply_fields, skip_exchange_id_res,
 };
 use super::transport::send_rpc;
 
@@ -49,7 +51,13 @@ async fn setup_session_with_cb_program(stream: &mut TcpStream, cb_program: u32) 
     assert_eq!(opnum, OP_CREATE_SESSION);
     assert_eq!(op_status, NfsStat4::Ok as u32);
 
-    parse_create_session_res(&mut resp)
+    let (sessionid, _, flags) = parse_create_session_res_full(&mut resp);
+    if cb_program == 0 {
+        assert_eq!(flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN, 0);
+    } else {
+        assert_ne!(flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN, 0);
+    }
+    sessionid
 }
 
 pub async fn setup_session_full(stream: &mut TcpStream) -> ([u8; 16], u64) {

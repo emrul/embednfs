@@ -166,10 +166,28 @@ pub fn parse_setclientid_res(resp: &mut Bytes) -> (u64, [u8; 8]) {
 }
 
 pub fn parse_create_session_res(resp: &mut Bytes) -> [u8; 16] {
+    let (sessionid, _, _) = parse_create_session_res_full(resp);
+    sessionid
+}
+
+pub fn parse_create_session_res_full(resp: &mut Bytes) -> ([u8; 16], u32, u32) {
     let session_data = decode_fixed_opaque(resp, 16).unwrap();
     let mut sessionid = [0u8; 16];
     sessionid.copy_from_slice(&session_data);
-    sessionid
+    let sequenceid = u32::decode(resp).unwrap();
+    let flags = u32::decode(resp).unwrap();
+    let _fore_attrs = ChannelAttrs4::decode(resp).unwrap();
+    let _back_attrs = ChannelAttrs4::decode(resp).unwrap();
+    (sessionid, sequenceid, flags)
+}
+
+pub fn parse_bind_conn_to_session_res(resp: &mut Bytes) -> ([u8; 16], u32, bool) {
+    let session_data = decode_fixed_opaque(resp, 16).unwrap();
+    let mut sessionid = [0u8; 16];
+    sessionid.copy_from_slice(&session_data);
+    let dir = u32::decode(resp).unwrap();
+    let use_conn_in_rdma_mode = bool::decode(resp).unwrap();
+    (sessionid, dir, use_conn_in_rdma_mode)
 }
 
 pub fn parse_write_res(resp: &mut Bytes) -> (u32, u32) {

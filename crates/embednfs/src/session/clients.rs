@@ -4,11 +4,13 @@ use std::sync::atomic::Ordering;
 use bytes::{Bytes, BytesMut};
 use embednfs_proto::xdr::XdrEncode;
 use embednfs_proto::{
-    AuthFlavor, BindConnToSessionArgs4, BindConnToSessionRes4, CallbackSecParms4, ChannelAttrs4,
-    Clientid4, CreateSessionArgs4, CreateSessionRes4, EXCHGID4_FLAG_CONFIRMED_R,
-    EXCHGID4_FLAG_USE_NON_PNFS, ExchangeIdArgs4, ExchangeIdRes4, NfsImplId4, NfsStat4, NfsTime4,
-    OpaqueAuth, OpenClaim4, SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED, Sessionid4, SetClientIdArgs4,
-    SetClientIdConfirmArgs4, SetClientIdRes4, StateProtect4R, Verifier4,
+    AuthFlavor, BindConnToSessionArgs4, BindConnToSessionRes4, CDFC4_BACK, CDFC4_BACK_OR_BOTH,
+    CDFC4_FORE, CDFC4_FORE_OR_BOTH, CDFS4_BACK, CDFS4_BOTH, CDFS4_FORE,
+    CREATE_SESSION4_FLAG_CONN_BACK_CHAN, CallbackSecParms4, ChannelAttrs4, Clientid4,
+    CreateSessionArgs4, CreateSessionRes4, EXCHGID4_FLAG_CONFIRMED_R, EXCHGID4_FLAG_USE_NON_PNFS,
+    ExchangeIdArgs4, ExchangeIdRes4, NfsImplId4, NfsStat4, NfsTime4, OpaqueAuth, OpenClaim4,
+    SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED, Sessionid4, SetClientIdArgs4, SetClientIdConfirmArgs4,
+    SetClientIdRes4, StateProtect4R, Verifier4,
 };
 
 use super::model::{
@@ -191,20 +193,35 @@ impl StateManager {
             rdma_ird: vec![],
         };
 
+        let backchannel = callback_backchannel(args, &back_chan);
+        let accept_current_backchannel =
+            backchannel.is_some() && args.flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN != 0;
+        let accepted_flags = if accept_current_backchannel {
+            CREATE_SESSION4_FLAG_CONN_BACK_CHAN
+        } else {
+            0
+        };
+        let back_connections = if accept_current_backchannel {
+            HashSet::from([connection_id])
+        } else {
+            HashSet::new()
+        };
+
         let _ = inner.sessions.insert(
             sessionid,
             SessionState {
                 clientid: args.clientid,
                 slots,
-                connections: HashSet::from([connection_id]),
-                backchannel: callback_backchannel(args, &back_chan),
+                fore_connections: HashSet::from([connection_id]),
+                back_connections,
+                backchannel,
             },
         );
 
         Ok(CreateSessionRes4 {
             sessionid,
             sequenceid: args.sequence,
-            flags: 0,
+            flags: accepted_flags,
             fore_chan_attrs: fore_chan,
             back_chan_attrs: back_chan,
         })
@@ -222,7 +239,9 @@ impl StateManager {
         let Some(session) = inner.sessions.get(sessionid) else {
             return Err(NfsStat4::BadSession);
         };
-        if !session.connections.contains(&connection_id) {
+        if !session.fore_connections.contains(&connection_id)
+            && !session.back_connections.contains(&connection_id)
+        {
             return Err(NfsStat4::ConnNotBoundToSession);
         }
         let _ = inner.sessions.remove(sessionid);
@@ -256,10 +275,10 @@ impl StateManager {
         let Some(session) = inner.sessions.get_mut(&args.sessionid) else {
             return Err(NfsStat4::BadSession);
         };
-        let _ = session.connections.insert(connection_id);
+        let response_dir = bind_connection_direction(session, args.dir, connection_id)?;
         Ok(BindConnToSessionRes4 {
             sessionid: args.sessionid,
-            dir: args.dir,
+            dir: response_dir,
             use_conn_in_rdma_mode: false,
         })
     }
@@ -279,7 +298,7 @@ impl StateManager {
             .sessions
             .values()
             .filter(|session| session.clientid == clientid && session.backchannel.is_some())
-            .flat_map(|session| session.connections.iter().copied())
+            .flat_map(|session| session.back_connections.iter().copied())
             .collect()
     }
 
@@ -292,7 +311,7 @@ impl StateManager {
         let (sessionid, session) = inner.sessions.iter_mut().find(|(_, session)| {
             session.clientid == clientid
                 && session.backchannel.is_some()
-                && session.connections.contains(&connection_id)
+                && session.back_connections.contains(&connection_id)
         })?;
         let backchannel = session.backchannel.as_mut()?;
         let sequenceid = backchannel.next_sequenceid;
@@ -310,7 +329,8 @@ impl StateManager {
     pub(crate) async fn remove_connection(&self, connection_id: u64) {
         let mut inner = self.inner.write().await;
         for session in inner.sessions.values_mut() {
-            let _ = session.connections.remove(&connection_id);
+            let _ = session.fore_connections.remove(&connection_id);
+            let _ = session.back_connections.remove(&connection_id);
         }
     }
 
@@ -573,6 +593,48 @@ impl StateManager {
                 .values()
                 .any(|state| state.owner.clientid == clientid)
             || Self::has_live_client_delegations(inner, clientid)
+    }
+}
+
+fn bind_connection_direction(
+    session: &mut SessionState,
+    client_dir: u32,
+    connection_id: u64,
+) -> Result<u32, NfsStat4> {
+    match client_dir {
+        CDFC4_FORE => {
+            let _ = session.fore_connections.insert(connection_id);
+            Ok(CDFS4_FORE)
+        }
+        CDFC4_BACK => {
+            ensure_backchannel_configured(session)?;
+            let _ = session.back_connections.insert(connection_id);
+            Ok(CDFS4_BACK)
+        }
+        CDFC4_FORE_OR_BOTH => {
+            let _ = session.fore_connections.insert(connection_id);
+            if session.backchannel.is_some() {
+                let _ = session.back_connections.insert(connection_id);
+                Ok(CDFS4_BOTH)
+            } else {
+                Ok(CDFS4_FORE)
+            }
+        }
+        CDFC4_BACK_OR_BOTH => {
+            ensure_backchannel_configured(session)?;
+            let _ = session.back_connections.insert(connection_id);
+            let _ = session.fore_connections.insert(connection_id);
+            Ok(CDFS4_BOTH)
+        }
+        _ => Err(NfsStat4::Inval),
+    }
+}
+
+fn ensure_backchannel_configured(session: &SessionState) -> Result<(), NfsStat4> {
+    if session.backchannel.is_some() {
+        Ok(())
+    } else {
+        Err(NfsStat4::Inval)
     }
 }
 
