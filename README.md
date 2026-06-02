@@ -4,14 +4,14 @@
 
 An embeddable NFSv4 server library in Rust. You implement a small filesystem trait; the library handles the wire protocol, sessions, filehandles, locking, and TCP serving over both NFSv4.0 (RFC 7530) and NFSv4.1 (RFC 8881) — the same server speaks both minor versions and lets the client pick.
 
-The primary implementation target is Apple/macOS client compatibility for a localhost FUSE-replacement use case. The macOS in-kernel `mount_nfs(8)` does not advertise minor version 1, so embednfs serves NFSv4.0 on that path; Linux is served via NFSv4.1 where the protocol picks up sessions and the xattr ops (RFC 8276) Linux relies on for extended attributes.
+The primary implementation target is Apple/macOS client compatibility for a localhost FUSE-replacement use case. The macOS in-kernel `mount_nfs(8)` does not advertise minor version 1, so embednfs serves NFSv4.0 on that path; Linux is served via NFSv4.1 where the protocol picks up sessions, the xattr ops (RFC 8276) Linux relies on for extended attributes, and opt-in read-only directory delegations for capable kernel clients.
 
 ## Support Boundary
 
 This project currently makes two important non-promises:
 
 - It does **not** guarantee correct or robust behavior over a real network. The target deployment is localhost. Running it over non-localhost transport may work in some cases, but that is not a supported or validated use case.
-- It targets macOS first (NFSv4.0 path) and the Linux in-kernel client (NFSv4.1 path) for xattr workflows. Other clients may work, but they are not a compatibility target.
+- It targets macOS first (NFSv4.0 path) and the Linux in-kernel client (NFSv4.1 path) for xattr and directory-delegation workflows. Other clients may work, but they are not a compatibility target.
 
 In short: the supported target is **macOS / Linux over localhost**.
 
@@ -43,10 +43,47 @@ Then mount:
 mkdir -p /tmp/embednfs
 mount_nfs -o vers=4,tcp,port=2049 127.0.0.1:/ /tmp/embednfs
 
-# Linux — vers=4.1 to opt into sessions and xattr ops.
+# Linux — vers=4.1 to opt into sessions, xattr ops, and delegation-capable clients.
 mkdir -p /mnt/embednfs
 mount -t nfs4 -o vers=4.1,proto=tcp,port=2049 127.0.0.1:/ /mnt/embednfs
 ```
+
+## NFSv4.1 Directory Delegations
+
+embednfs supports opt-in read-only NFSv4.1 directory delegations. A Linux
+kernel client that requests `GET_DIR_DELEGATION` can cache directory and
+negative-lookup state while the server recalls the delegation before external
+namespace mutations.
+
+Client requirement: Linux kernel 6.19 or higher, mounted with `vers=4.1`. Older
+Linux kernels may mount and pass normal NFSv4.1 workflows, but can skip
+`GET_DIR_DELEGATION`; use the smoke harness with `REQUIRE_DELEGATIONS=1` when
+claiming real delegation interop.
+
+Library usage:
+
+```rust
+let server = NfsServer::builder(fs)
+    .directory_delegations(true)
+    .build();
+```
+
+Daemon usage:
+
+```bash
+EMBEDNFS_DIRECTORY_DELEGATIONS=1 \
+EMBEDNFS_RECALL_TIMEOUT_MS=1000 \
+cargo run -p embednfsd --release
+```
+
+Directory delegations are disabled by default. Embedders that mutate the backing
+namespace outside the NFS request path should keep an `NfsServerControl` handle
+and call `recall_directory(...)` before applying the external create, unlink, or
+rename. The Linux product gate measures visibility after a parent-directory
+namespace refresh; path-only `test -e` loops can still observe Linux dentry-cache
+state after external unlink or rename. See
+[`docs/linux-client-compatibility.md`](docs/linux-client-compatibility.md) for
+validated kernel behavior and harness controls.
 
 ## Filesystem API
 
@@ -181,21 +218,24 @@ Supported through extensions:
 - `LINK`
 - macOS named-attribute and xattr flows behind `OPENATTR`
 
+Opt-in Linux NFSv4.1 directory-delegation support:
+
+- `GET_DIR_DELEGATION`
+- callback `CB_SEQUENCE` and `CB_RECALL`
+- state-aware `DELEGRETURN`, `TEST_STATEID`, and `FREE_STATEID` for directory delegations
+
 Kept as cheap compatibility ops:
 
 - `SECINFO`
 - `PUTPUBFH`
 - `VERIFY`
-- `TEST_STATEID`
 - `DELEGPURGE`
 - `BIND_CONN_TO_SESSION`
-- `DELEGRETURN`
 
 Explicitly unsupported:
 
 - `BACKCHANNEL_CTL`
 - `GETDEVICEINFO`, `GETDEVICELIST`
-- `GET_DIR_DELEGATION`
 - `LAYOUTGET`, `LAYOUTRETURN`, `LAYOUTCOMMIT`
 - `SET_SSV`
 - `WANT_DELEGATION`
