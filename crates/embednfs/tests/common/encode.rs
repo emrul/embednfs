@@ -3,6 +3,9 @@ use bytes::{BufMut, BytesMut};
 use embednfs_proto::xdr::*;
 use embednfs_proto::*;
 
+const TEST_MAX_IO_SIZE: u32 = 2 * 1024 * 1024;
+const TEST_SESSION_IO_HEADROOM: u32 = 4096;
+
 pub fn encode_compound_minor(tag: &str, minorversion: u32, ops: &[&[u8]]) -> Vec<u8> {
     let mut buf = BytesMut::with_capacity(512);
     tag.to_string().encode(&mut buf);
@@ -103,6 +106,40 @@ pub fn encode_create_session_with_callback_flags(
     cb_program: u32,
     flags: u32,
 ) -> Vec<u8> {
+    encode_create_session_with_callback_flags_and_fore_attrs(
+        clientid,
+        seq,
+        cb_program,
+        flags,
+        TEST_MAX_IO_SIZE + TEST_SESSION_IO_HEADROOM,
+        TEST_MAX_IO_SIZE + TEST_SESSION_IO_HEADROOM,
+    )
+}
+
+pub fn encode_create_session_with_fore_attrs(
+    clientid: u64,
+    seq: u32,
+    maxrequestsize: u32,
+    maxresponsesize: u32,
+) -> Vec<u8> {
+    encode_create_session_with_callback_flags_and_fore_attrs(
+        clientid,
+        seq,
+        0,
+        0,
+        maxrequestsize,
+        maxresponsesize,
+    )
+}
+
+fn encode_create_session_with_callback_flags_and_fore_attrs(
+    clientid: u64,
+    seq: u32,
+    cb_program: u32,
+    flags: u32,
+    maxrequestsize: u32,
+    maxresponsesize: u32,
+) -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_CREATE_SESSION.encode(&mut buf);
     clientid.encode(&mut buf);
@@ -110,8 +147,8 @@ pub fn encode_create_session_with_callback_flags(
     flags.encode(&mut buf);
 
     0u32.encode(&mut buf);
-    1_048_576u32.encode(&mut buf);
-    1_048_576u32.encode(&mut buf);
+    maxrequestsize.encode(&mut buf);
+    maxresponsesize.encode(&mut buf);
     8192u32.encode(&mut buf);
     16u32.encode(&mut buf);
     8u32.encode(&mut buf);
@@ -145,8 +182,8 @@ pub fn encode_create_session_rpcsec_gss(
     0u32.encode(&mut buf);
 
     0u32.encode(&mut buf);
-    1_048_576u32.encode(&mut buf);
-    1_048_576u32.encode(&mut buf);
+    (TEST_MAX_IO_SIZE + TEST_SESSION_IO_HEADROOM).encode(&mut buf);
+    (TEST_MAX_IO_SIZE + TEST_SESSION_IO_HEADROOM).encode(&mut buf);
     8192u32.encode(&mut buf);
     16u32.encode(&mut buf);
     8u32.encode(&mut buf);

@@ -444,6 +444,42 @@ async fn test_v41_session_flow_and_readdir() {
     assert_eq!(op_status, NfsStat4::Ok as u32);
 }
 
+/// CREATE_SESSION keeps enough fore-channel room for a 2 MiB READ or WRITE payload.
+/// Origin: Apple NFS client `nfs4_vnops.c` CREATE_SESSION uses I/O size plus XDR headroom.
+/// RFC: RFC 8881 §2.10.6.1, §18.36.3.
+#[tokio::test]
+async fn test_create_session_advertises_two_mib_fore_channel() {
+    const TWO_MIB: u32 = 2 * 1024 * 1024;
+    const XDR_HEADROOM: u32 = 4096;
+
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+
+    let exchange_id_op = encode_exchange_id();
+    let compound = encode_compound("exchange-id", &[&exchange_id_op]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let _ = parse_op_header(&mut resp);
+    let (clientid, sequenceid) = skip_exchange_id_res(&mut resp);
+
+    let requested = TWO_MIB + XDR_HEADROOM;
+    let create_session_op =
+        encode_create_session_with_fore_attrs(clientid, sequenceid, requested, requested);
+    let compound = encode_compound("create-session", &[&create_session_op]);
+    let mut resp = send_rpc(&mut stream, 2, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_CREATE_SESSION);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (_, _, _, fore_attrs, _) = parse_create_session_res_with_attrs(&mut resp);
+    assert_eq!(fore_attrs.maxrequestsize, requested);
+    assert_eq!(fore_attrs.maxresponsesize, requested);
+}
+
 /// CREATE_SESSION with an unknown clientid returns `NFS4ERR_STALE_CLIENTID`.
 /// Origin: `pynfs/nfs4.1/server41tests/st_create_session.py` (CODE `CSESS3`).
 /// RFC: RFC 8881 §18.36.3.

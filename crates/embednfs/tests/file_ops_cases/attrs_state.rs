@@ -1164,6 +1164,18 @@ async fn test_getattr_fs_level_attrs() {
     assert_eq!(op_status, NfsStat4::Ok as u32);
     let fattr = Fattr4::decode(&mut resp).unwrap();
     assert!(!fattr.attr_vals.is_empty());
+    assert!(fattr.attrmask.is_set(FATTR4_MAXREAD));
+    assert!(fattr.attrmask.is_set(FATTR4_MAXWRITE));
+
+    let mut vals = fattr.attr_vals;
+    let _fsid_major = u64::decode(&mut vals).unwrap();
+    let _fsid_minor = u64::decode(&mut vals).unwrap();
+    let _lease_time = u32::decode(&mut vals).unwrap();
+    let maxread = u64::decode(&mut vals).unwrap();
+    let maxwrite = u64::decode(&mut vals).unwrap();
+    assert_eq!(maxread, 2 * 1024 * 1024);
+    assert_eq!(maxwrite, 2 * 1024 * 1024);
+    assert!(vals.is_empty());
 }
 
 /// WRITE to a new file is reflected in subsequent GETATTR size results.

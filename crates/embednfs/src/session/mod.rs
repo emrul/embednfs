@@ -10,6 +10,7 @@ use embednfs_proto::{ServerOwner4, Verifier4};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
+use crate::fs::DEFAULT_MAX_IO_SIZE;
 use crate::identity::NfsServerIdentity;
 use crate::internal::ServerObject;
 
@@ -26,7 +27,7 @@ mod stateids;
 mod tests;
 
 const MAX_FORE_CHAN_SLOTS: u32 = 64;
-const MAX_REQUEST_SIZE: u32 = 1_049_620;
+const MAX_REQUEST_SIZE: u32 = DEFAULT_MAX_IO_SIZE + 4096;
 const MAX_CACHED_RESPONSE: u32 = 6144;
 const SYNTH_FILEID_BASE: u64 = 1u64 << 63;
 pub(crate) const DEFAULT_LEASE_TIME_SECS: u32 = 90;

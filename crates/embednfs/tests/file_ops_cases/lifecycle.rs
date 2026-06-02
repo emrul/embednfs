@@ -508,6 +508,111 @@ async fn test_write_and_read_back() {
     assert_eq!(data.as_ref(), b"test data 12345");
 }
 
+/// WRITE and READ handle the advertised 2 MiB maximum I/O size over TCP.
+/// Origin: derived from `pynfs/nfs4.0/servertests/st_write.py` (CODE `WRT5a`, `WRT5b`).
+/// RFC: RFC 8881 §5.8.2.20, §5.8.2.21, §18.22.3, §18.32.3.
+#[tokio::test]
+async fn test_two_mib_write_read_and_limit_enforcement() {
+    const TWO_MIB: usize = 2 * 1024 * 1024;
+
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let open_op = encode_open_create("two-mib.bin");
+    let getfh_op = encode_getfh();
+    let compound = encode_compound("open-large", &[&seq_op, &rootfh_op, &open_op, &getfh_op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    let stateid = skip_open_res(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    let file_fh = parse_getfh(&mut resp);
+
+    let data: Vec<u8> = (0..TWO_MIB).map(|idx| (idx % 251) as u8).collect();
+    let seq_op = encode_sequence(&sessionid, 2, 0);
+    let putfh_op = encode_putfh(&file_fh);
+    let write_op = encode_write(&stateid, 0, &data);
+    let compound = encode_compound("write-two-mib", &[&seq_op, &putfh_op, &write_op]);
+    let mut resp = send_rpc(&mut stream, 4, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_WRITE);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (count, _) = parse_write_res(&mut resp);
+    assert_eq!(count, TWO_MIB as u32);
+
+    let seq_op = encode_sequence(&sessionid, 3, 0);
+    let read_op = encode_read(0, TWO_MIB as u32);
+    let compound = encode_compound("read-two-mib", &[&seq_op, &putfh_op, &read_op]);
+    let mut resp = send_rpc(&mut stream, 5, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_READ);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (eof, read_data) = parse_read_res(&mut resp);
+    assert!(eof);
+    assert_eq!(read_data.len(), TWO_MIB);
+    assert_eq!(read_data.as_ref(), data.as_slice());
+
+    let seq_op = encode_sequence(&sessionid, 4, 0);
+    let write_tail = encode_write(&stateid, TWO_MIB as u64, b"!");
+    let compound = encode_compound("write-tail", &[&seq_op, &putfh_op, &write_tail]);
+    let mut resp = send_rpc(&mut stream, 6, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+
+    let seq_op = encode_sequence(&sessionid, 5, 0);
+    let read_op = encode_read(0, TWO_MIB as u32 + 1);
+    let compound = encode_compound("read-capped", &[&seq_op, &putfh_op, &read_op]);
+    let mut resp = send_rpc(&mut stream, 7, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_READ);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (eof, read_data) = parse_read_res(&mut resp);
+    assert!(!eof);
+    assert_eq!(read_data.len(), TWO_MIB);
+
+    let oversized = vec![0x5a; TWO_MIB + 1];
+    let seq_op = encode_sequence(&sessionid, 6, 0);
+    let write_op = encode_write(&stateid, 0, &oversized);
+    let compound = encode_compound("write-too-large", &[&seq_op, &putfh_op, &write_op]);
+    let mut resp = send_rpc(&mut stream, 8, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Inval as u32);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_WRITE);
+    assert_eq!(op_status, NfsStat4::Inval as u32);
+}
+
 /// WRITE beyond EOF preserves a hole before the written bytes.
 /// Origin: derived from `pynfs/nfs4.0/servertests/st_write.py` (CODE `WRT1b`).
 /// RFC: RFC 8881 §18.32.3.

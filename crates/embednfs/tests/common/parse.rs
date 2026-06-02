@@ -195,14 +195,21 @@ pub fn parse_create_session_res(resp: &mut Bytes) -> [u8; 16] {
 }
 
 pub fn parse_create_session_res_full(resp: &mut Bytes) -> ([u8; 16], u32, u32) {
+    let (sessionid, sequenceid, flags, _, _) = parse_create_session_res_with_attrs(resp);
+    (sessionid, sequenceid, flags)
+}
+
+pub fn parse_create_session_res_with_attrs(
+    resp: &mut Bytes,
+) -> ([u8; 16], u32, u32, ChannelAttrs4, ChannelAttrs4) {
     let session_data = decode_fixed_opaque(resp, 16).unwrap();
     let mut sessionid = [0u8; 16];
     sessionid.copy_from_slice(&session_data);
     let sequenceid = u32::decode(resp).unwrap();
     let flags = u32::decode(resp).unwrap();
-    let _fore_attrs = ChannelAttrs4::decode(resp).unwrap();
-    let _back_attrs = ChannelAttrs4::decode(resp).unwrap();
-    (sessionid, sequenceid, flags)
+    let fore_attrs = ChannelAttrs4::decode(resp).unwrap();
+    let back_attrs = ChannelAttrs4::decode(resp).unwrap();
+    (sessionid, sequenceid, flags, fore_attrs, back_attrs)
 }
 
 pub fn parse_bind_conn_to_session_res(resp: &mut Bytes) -> ([u8; 16], u32, bool) {

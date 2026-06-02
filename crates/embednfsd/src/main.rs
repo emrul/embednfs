@@ -153,9 +153,8 @@ impl FileSystem for LocalFs {
     fn limits(&self) -> FsLimits {
         FsLimits {
             max_name_bytes: 255,
-            max_read: 1_048_576,
-            max_write: 1_048_576,
             max_file_size: u64::MAX / 2,
+            ..FsLimits::default()
         }
     }
 
