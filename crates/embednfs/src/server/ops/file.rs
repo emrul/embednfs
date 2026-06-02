@@ -517,7 +517,6 @@ impl<F: FileSystem> NfsServer<F> {
             Ok(resolved) => resolved,
             Err(status) => return NfsResop4::Read(status, None),
         };
-        let count = args.count.min(self.limits().max_read);
 
         if let Err(status) = self
             .validate_io_stateid(
@@ -528,7 +527,7 @@ impl<F: FileSystem> NfsServer<F> {
                     sequence_clientid,
                     is_write: false,
                     offset: args.offset,
-                    length: count as u64,
+                    length: args.count as u64,
                 },
             )
             .await
@@ -546,10 +545,10 @@ impl<F: FileSystem> NfsServer<F> {
                     Err(e) => return NfsResop4::Read(e.to_nfsstat4(), None),
                     _ => {}
                 }
-                self.read(request_ctx, id, args.offset, count).await
+                self.read(request_ctx, id, args.offset, args.count).await
             }
             ServerObject::NamedAttrFile { parent, name } => {
-                self.xattr_read_slice(request_ctx, parent, &name, args.offset, count)
+                self.xattr_read_slice(request_ctx, parent, &name, args.offset, args.count)
                     .await
             }
             ServerObject::NamedAttrDir(_) => Err(FsError::IsDirectory),
@@ -603,9 +602,6 @@ impl<F: FileSystem> NfsServer<F> {
             Ok(resolved) => resolved,
             Err(status) => return NfsResop4::Write(status, None),
         };
-        if args.data.len() > self.limits().max_write as usize {
-            return NfsResop4::Write(NfsStat4::Inval, None);
-        }
 
         if let Err(status) = self
             .validate_io_stateid(

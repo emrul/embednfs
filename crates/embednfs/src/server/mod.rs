@@ -22,7 +22,7 @@ use crate::session::StateManager;
 
 const RPC_LAST_FRAGMENT: u32 = 0x8000_0000;
 const RPC_FRAG_LEN_MASK: u32 = 0x7fff_ffff;
-const MAX_FRAGMENT_SIZE: usize = DEFAULT_MAX_IO_SIZE as usize + 64 * 1024;
+const MAX_FRAGMENT_SIZE: usize = 2 * 1024 * 1024;
 const CONN_BUF_SIZE: usize = 65_536;
 
 type NfsResult<T> = FsResult<T>;

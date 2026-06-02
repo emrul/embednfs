@@ -139,8 +139,6 @@ impl Default for FsCapabilities {
     }
 }
 
-pub(crate) const DEFAULT_MAX_IO_SIZE: u32 = 2 * 1024 * 1024;
-
 /// Exported filesystem limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FsLimits {
@@ -158,8 +156,8 @@ impl Default for FsLimits {
     fn default() -> Self {
         Self {
             max_name_bytes: 255,
-            max_read: DEFAULT_MAX_IO_SIZE,
-            max_write: DEFAULT_MAX_IO_SIZE,
+            max_read: 1_048_576,
+            max_write: 1_048_576,
             max_file_size: 1 << 40,
         }
     }
