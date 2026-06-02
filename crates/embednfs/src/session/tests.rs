@@ -32,6 +32,7 @@ impl ManualClock {
             lease_duration,
             revoked_retention: lease_duration,
             now: Arc::new(move || *now.lock().unwrap()),
+            ..StateConfig::default()
         }
     }
 

@@ -6,6 +6,7 @@
 
 pub(crate) mod attrs;
 pub(crate) mod fs;
+mod identity;
 pub(crate) mod internal;
 pub(crate) mod memfs;
 pub(crate) mod server;
@@ -17,6 +18,7 @@ pub use fs::{
     HardLinks, ObjectType, OpenLifecycle, ReadResult, RequestContext, SetAttrs, SetTime, Symlinks,
     Timestamp, WriteResult, WriteStability, XattrSetMode, Xattrs,
 };
+pub use identity::NfsServerIdentity;
 pub use memfs::MemFs;
 pub use server::{
     DelegationConfig, IdMapper, NfsServer, NfsServerBuilder, NfsServerControl, NumericIdMapper,

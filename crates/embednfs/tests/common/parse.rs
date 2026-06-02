@@ -136,16 +136,40 @@ pub fn skip_exchange_id_res(resp: &mut Bytes) -> (u64, u32) {
     (clientid, sequenceid)
 }
 
+pub struct ExchangeIdFields {
+    pub clientid: u64,
+    pub sequenceid: u32,
+    pub flags: u32,
+    pub server_owner_minor_id: u64,
+    pub server_owner_major_id: Vec<u8>,
+    pub server_scope: Vec<u8>,
+}
+
 pub fn parse_exchange_id_res(resp: &mut Bytes) -> (u64, u32, u32) {
+    let fields = parse_exchange_id_res_full(resp);
+    (fields.clientid, fields.sequenceid, fields.flags)
+}
+
+pub fn parse_exchange_id_res_full(resp: &mut Bytes) -> ExchangeIdFields {
     let clientid = u64::decode(resp).unwrap();
     let sequenceid = u32::decode(resp).unwrap();
     let flags = u32::decode(resp).unwrap();
     let _state_protect = u32::decode(resp).unwrap();
-    let _server_minor_id = u64::decode(resp).unwrap();
-    let _server_major_id = Vec::<u8>::decode(resp).unwrap();
-    let _server_scope = Vec::<u8>::decode(resp).unwrap();
-    let _impl_count = u32::decode(resp).unwrap();
-    (clientid, sequenceid, flags)
+    let server_owner_minor_id = u64::decode(resp).unwrap();
+    let server_owner_major_id = Vec::<u8>::decode(resp).unwrap();
+    let server_scope = Vec::<u8>::decode(resp).unwrap();
+    let impl_count = u32::decode(resp).unwrap();
+    for _ in 0..impl_count {
+        let _ = NfsImplId4::decode(resp).unwrap();
+    }
+    ExchangeIdFields {
+        clientid,
+        sequenceid,
+        flags,
+        server_owner_minor_id,
+        server_owner_major_id,
+        server_scope,
+    }
 }
 
 pub fn skip_sequence_res(resp: &mut Bytes) {

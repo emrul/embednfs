@@ -1,5 +1,7 @@
 use super::*;
 
+use embednfs::NfsServerIdentity;
+
 // ===== NULL procedure (pynfs COMP1) =====
 
 /// NULL procedure must return success with empty body.
@@ -233,6 +235,65 @@ async fn test_exchange_id_basic() {
     assert_ne!(clientid, 0);
     assert!(sequenceid > 0);
     assert_ne!(flags & EXCHGID4_FLAG_MASK_PNFS, 0);
+}
+
+/// EXCHANGE_ID returns the configured server owner and scope.
+/// Origin: regression coverage for configurable NFSv4.1 server identity.
+/// RFC: RFC 8881 §§2.10.4, 2.10.5, 18.35.3.
+#[tokio::test]
+async fn test_exchange_id_returns_configured_server_identity() {
+    let identity = NfsServerIdentity::new("embednfs-test-owner", 42, "embednfs-test-scope");
+    let port = start_server_with_identity(identity).await;
+    let mut stream = connect(port).await;
+
+    let exchange_id_op = encode_exchange_id();
+    let compound = encode_compound("exid-identity", &[&exchange_id_op]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);
+    assert_eq!(accept_stat, 0);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_EXCHANGE_ID);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let fields = parse_exchange_id_res_full(&mut resp);
+    assert_eq!(fields.server_owner_minor_id, 42);
+    assert_eq!(
+        fields.server_owner_major_id.as_slice(),
+        b"embednfs-test-owner"
+    );
+    assert_eq!(fields.server_scope.as_slice(), b"embednfs-test-scope");
+}
+
+/// Default server identities differ across independent NFS server instances.
+/// Origin: regression coverage for avoiding accidental Linux session trunking.
+/// RFC: RFC 8881 §§2.10.4, 2.10.5, 18.35.3.
+#[tokio::test]
+async fn test_exchange_id_default_identity_is_per_instance() {
+    let first_port = start_server().await;
+    let second_port = start_server().await;
+
+    let first = exchange_id_identity(first_port).await;
+    let second = exchange_id_identity(second_port).await;
+
+    assert_ne!(first.server_owner_major_id, second.server_owner_major_id);
+    assert_ne!(first.server_scope, second.server_scope);
+}
+
+async fn exchange_id_identity(port: u16) -> ExchangeIdFields {
+    let mut stream = connect(port).await;
+    let exchange_id_op = encode_exchange_id();
+    let compound = encode_compound("exid-identity", &[&exchange_id_op]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_EXCHANGE_ID);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    parse_exchange_id_res_full(&mut resp)
 }
 
 /// EXCHANGE_ID with unsupported non-`SP4_NONE` state protection returns `NFS4ERR_INVAL`.

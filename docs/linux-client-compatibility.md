@@ -251,13 +251,13 @@ Risk:
 
 - `CREATE_SESSION` currently sets `maxoperations` to `min(client.maxoperations, MAX_FORE_CHAN_SLOTS)`. The name implies slot count, not compound operation count. If `MAX_FORE_CHAN_SLOTS` is small, Linux may limit COMPOUND construction unnecessarily, or reject a response that violates its requested minimums.
 - Backchannel attributes are synthetic and small. Linux nfsd ignores backchannel attributes, but Linux client behavior against third-party servers should be traced.
-- Session trunking identity must remain stable. `server_owner` and `server_scope` are fixed, which is good for localhost, but multiple independent `embednfs` instances on different ports may look like the same trunkable server to Linux.
+- Session trunking identity must remain stable. The library default now creates a unique identity per `NfsServer` instance, while `embednfsd` derives a stable identity from canonical root plus listen address so same-daemon restarts remain recognizable and independent ports/exports do not look trunkable.
 
 Design direction:
 
 - Confirm negotiated `CREATE_SESSION` response with packet capture or tracepoints.
 - Introduce explicit constants for `maxoperations` vs `maxrequests` if they are currently conflated.
-- Consider deriving `server_scope` or `server_owner` from the listener/export identity when supporting multiple simultaneous local servers.
+- Use `NfsServerIdentity` or the `EMBEDNFS_SERVER_OWNER_MAJOR_ID`, `EMBEDNFS_SERVER_OWNER_MINOR_ID`, and `EMBEDNFS_SERVER_SCOPE` daemon environment variables when a deployment intentionally wants multiple listeners to share one NFSv4.1 server identity.
 
 ### 3. Root Filehandle and Export Path Semantics
 
@@ -452,4 +452,4 @@ These are candidates only; implement them after a Linux mount trace confirms the
 - Which exact fsinfo/pathconf attributes does Linux require to set sane `rsize`, `wsize`, name length, and cache behavior?
 - Does Linux kernel-client xattr interop pass against the current RFC 8276 implementation when mounted with the required minor version and `setfattr`/`getfattr` are available? Current finding: v4.1 `setfattr` did not issue `OPENATTR`, and the 2026-06-02 smoke skipped xattrs.
 - Are current directory `change` and `mtime` updates sufficient for Linux dentry-cache invalidation across all backend implementations?
-- Should `server_owner`/`server_scope` include per-instance identity to avoid accidental Linux session trunking across multiple localhost servers?
+- Do target deployments need explicit stable `server_owner`/`server_scope` values for intentional multi-listener trunking, or is the per-instance/per-daemon default sufficient?

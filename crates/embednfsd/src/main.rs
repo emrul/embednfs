@@ -10,8 +10,8 @@ use bytes::Bytes;
 use embednfs::{
     AccessMask, Attrs, CommitSupport, CreateKind, CreateRequest, CreateResult, DelegationConfig,
     DirEntry, DirPage, FileSystem, FsCapabilities, FsError, FsLimits, FsResult, FsStats, HardLinks,
-    NfsServer, NfsServerControl, ObjectType, ReadResult, RequestContext, SetAttrs, SetTime,
-    Symlinks, Timestamp, WriteResult, WriteStability,
+    NfsServer, NfsServerControl, NfsServerIdentity, ObjectType, ReadResult, RequestContext,
+    SetAttrs, SetTime, Symlinks, Timestamp, WriteResult, WriteStability,
 };
 #[cfg(target_os = "linux")]
 use embednfs::{XattrSetMode, Xattrs};
@@ -567,6 +567,8 @@ async fn main() -> std::io::Result<()> {
 
     let fs = LocalFs::new(root)
         .map_err(|err| std::io::Error::other(format!("failed to initialize local fs: {err}")))?;
+    let server_identity = server_identity_from_env(default_server_identity(&fs.root, &listen))
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
     info!(
         "serving {} on {listen}; directory_delegations={}",
         fs.root.display(),
@@ -574,6 +576,7 @@ async fn main() -> std::io::Result<()> {
     );
     let server = NfsServer::builder(fs)
         .delegation_config(delegation_config)
+        .server_identity(server_identity)
         .build();
 
     if let Some(control_addr) = control_listen {
@@ -643,10 +646,54 @@ fn delegation_config_from_env() -> Result<DelegationConfig, String> {
     Ok(config)
 }
 
+fn default_server_identity(root: &Path, listen: &str) -> NfsServerIdentity {
+    let token = format!(
+        "embednfsd:{:016x}",
+        stable_identity_hash(root.as_os_str().as_bytes(), listen.as_bytes())
+    );
+    NfsServerIdentity::new(token.clone(), 0, token)
+}
+
+fn stable_identity_hash(root: &[u8], listen: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in listen.iter().chain([0].iter()).chain(root.iter()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn server_identity_from_env(
+    default_identity: NfsServerIdentity,
+) -> Result<NfsServerIdentity, String> {
+    let mut identity = default_identity;
+    if let Some(owner_major_id) = env_optional_bytes("EMBEDNFS_SERVER_OWNER_MAJOR_ID") {
+        identity = identity.with_owner_major_id(owner_major_id);
+    }
+    if let Some(owner_minor_id) = env_optional_u64("EMBEDNFS_SERVER_OWNER_MINOR_ID")? {
+        identity = identity.with_owner_minor_id(owner_minor_id);
+    }
+    if let Some(scope) = env_optional_bytes("EMBEDNFS_SERVER_SCOPE") {
+        identity = identity.with_scope(scope);
+    }
+    Ok(identity)
+}
+
 fn env_optional(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
+}
+
+fn env_optional_bytes(name: &str) -> Option<Bytes> {
+    std::env::var_os(name).and_then(|value| {
+        let bytes = value.as_os_str().as_bytes();
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            None
+        } else {
+            Some(Bytes::copy_from_slice(bytes))
+        }
+    })
 }
 
 fn env_bool(name: &str, default: bool) -> Result<bool, String> {
@@ -658,6 +705,20 @@ fn env_bool(name: &str, default: bool) -> Result<bool, String> {
         "0" | "false" | "no" | "off" => Ok(false),
         value => Err(format!("{name} must be a boolean, got {value:?}")),
     }
+}
+
+fn env_optional_u64(name: &str) -> Result<Option<u64>, String> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy();
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse()
+        .map(Some)
+        .map_err(|err| format!("{name} must be an unsigned integer: {err}"))
 }
 
 fn env_u64(name: &str, default: u64) -> Result<u64, String> {
@@ -683,6 +744,30 @@ fn reject_unsafe_relative(path: &Path) -> FsResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_server_identity_is_stable_for_same_root_and_listen() {
+        let first = default_server_identity(Path::new("/tmp/embednfs-root"), "127.0.0.1:2049");
+        let second = default_server_identity(Path::new("/tmp/embednfs-root"), "127.0.0.1:2049");
+
+        assert_eq!(first.owner_major_id(), second.owner_major_id());
+        assert_eq!(first.owner_minor_id(), second.owner_minor_id());
+        assert_eq!(first.scope(), second.scope());
+    }
+
+    #[test]
+    fn default_server_identity_differs_for_different_listen_addresses() {
+        let first = default_server_identity(Path::new("/tmp/embednfs-root"), "127.0.0.1:2049");
+        let second = default_server_identity(Path::new("/tmp/embednfs-root"), "127.0.0.1:2050");
+
+        assert_ne!(first.owner_major_id(), second.owner_major_id());
+        assert_ne!(first.scope(), second.scope());
+    }
 }
 
 fn c_path(path: &Path) -> FsResult<std::ffi::CString> {

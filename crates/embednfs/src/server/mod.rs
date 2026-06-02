@@ -16,6 +16,7 @@ use embednfs_proto::xdr::*;
 use embednfs_proto::*;
 
 use crate::fs::*;
+use crate::identity::NfsServerIdentity;
 use crate::internal::{ObjectId, ServerObject};
 use crate::session::StateManager;
 
@@ -60,6 +61,7 @@ pub struct NfsServerBuilder<F: FileSystem> {
     fs: F,
     id_mapper: Arc<dyn IdMapper>,
     delegation_config: DelegationConfig,
+    server_identity: NfsServerIdentity,
 }
 
 impl<F: FileSystem> NfsServerBuilder<F> {
@@ -81,11 +83,32 @@ impl<F: FileSystem> NfsServerBuilder<F> {
         self
     }
 
+    /// Replaces the NFSv4.1 server identity returned by `EXCHANGE_ID`.
+    pub fn server_identity(mut self, identity: NfsServerIdentity) -> Self {
+        self.server_identity = identity;
+        self
+    }
+
+    /// Replaces the NFSv4.1 `server_owner` value returned by `EXCHANGE_ID`.
+    pub fn server_owner(mut self, minor_id: u64, major_id: impl Into<Bytes>) -> Self {
+        self.server_identity = self
+            .server_identity
+            .with_owner_minor_id(minor_id)
+            .with_owner_major_id(major_id);
+        self
+    }
+
+    /// Replaces the NFSv4.1 `server_scope` value returned by `EXCHANGE_ID`.
+    pub fn server_scope(mut self, scope: impl Into<Bytes>) -> Self {
+        self.server_identity = self.server_identity.with_scope(scope);
+        self
+    }
+
     /// Builds the server instance.
     pub fn build(self) -> NfsServer<F> {
         NfsServer {
             fs: Arc::new(self.fs),
-            state: Arc::new(StateManager::new()),
+            state: Arc::new(StateManager::with_server_identity(self.server_identity)),
             handle_to_object: Arc::new(RwLock::new(HashMap::new())),
             object_to_handle: Arc::new(RwLock::new(HashMap::new())),
             next_object_id: AtomicU64::new(1),
@@ -169,6 +192,7 @@ impl<F: FileSystem> NfsServer<F> {
             fs,
             id_mapper: Arc::new(NumericIdMapper),
             delegation_config: DelegationConfig::default(),
+            server_identity: NfsServerIdentity::default(),
         }
     }
 

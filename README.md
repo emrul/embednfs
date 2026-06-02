@@ -85,6 +85,27 @@ state after external unlink or rename. See
 [`docs/linux-client-compatibility.md`](docs/linux-client-compatibility.md) for
 validated kernel behavior and harness controls.
 
+## NFSv4.1 Server Identity
+
+NFSv4.1 clients use the `EXCHANGE_ID` `server_owner` and `server_scope` fields
+to decide whether multiple connections can be treated as the same trunkable
+server. The library default is unique per `NfsServer` instance to avoid
+accidental trunking between independent localhost servers. Configure a stable
+shared identity when one logical server is intentionally exposed through
+multiple listeners:
+
+```rust
+let identity = embednfs::NfsServerIdentity::new("my-embednfs-server", 0, "my-embednfs-scope");
+let server = NfsServer::builder(fs)
+    .server_identity(identity)
+    .build();
+```
+
+`embednfsd` derives a stable default identity from its canonical root and listen
+address, so restarts of the same daemon keep the same identity while independent
+ports/exports differ. Override it with `EMBEDNFS_SERVER_OWNER_MAJOR_ID`,
+`EMBEDNFS_SERVER_OWNER_MINOR_ID`, and `EMBEDNFS_SERVER_SCOPE`.
+
 ## Filesystem API
 
 The filesystem API is handle-based and models the exported filesystem rather than the raw backing store. Weak backends such as exFAT- or S3-style adapters are expected to provide stable handles, exported attrs, and any overlay metadata they need behind the trait.

@@ -10,6 +10,7 @@ use embednfs_proto::{ServerOwner4, Verifier4};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
+use crate::identity::NfsServerIdentity;
 use crate::internal::ServerObject;
 
 mod clients;
@@ -37,9 +38,20 @@ struct StateConfig {
     lease_duration: Duration,
     revoked_retention: Duration,
     now: NowFn,
+    identity: NfsServerIdentity,
 }
 
 impl StateConfig {
+    fn new(identity: NfsServerIdentity) -> Self {
+        let lease_duration = Duration::from_secs(u64::from(DEFAULT_LEASE_TIME_SECS));
+        Self {
+            lease_duration,
+            revoked_retention: lease_duration,
+            now: Arc::new(Self::default_now),
+            identity,
+        }
+    }
+
     fn default_now() -> Instant {
         Instant::now()
     }
@@ -51,12 +63,7 @@ impl StateConfig {
 
 impl Default for StateConfig {
     fn default() -> Self {
-        let lease_duration = Duration::from_secs(u64::from(DEFAULT_LEASE_TIME_SECS));
-        Self {
-            lease_duration,
-            revoked_retention: lease_duration,
-            now: Arc::new(Self::default_now),
-        }
+        Self::new(NfsServerIdentity::default())
     }
 }
 
@@ -83,11 +90,16 @@ pub(crate) struct StateManager {
     /// Server boot verifier (changes each restart).
     pub(crate) write_verifier: Verifier4,
     pub(crate) server_owner: ServerOwner4,
+    pub(crate) server_scope: Bytes,
 }
 
 impl StateManager {
     pub(crate) fn new() -> Self {
         Self::with_config(StateConfig::default())
+    }
+
+    pub(crate) fn with_server_identity(identity: NfsServerIdentity) -> Self {
+        Self::with_config(StateConfig::new(identity))
     }
 
     fn with_config(config: StateConfig) -> Self {
@@ -100,9 +112,10 @@ impl StateManager {
         write_verifier.copy_from_slice(&verifier_value.to_be_bytes());
 
         let server_owner = ServerOwner4 {
-            minor_id: 0,
-            major_id: Bytes::from_static(b"embednfs"),
+            minor_id: config.identity.owner_minor_id(),
+            major_id: config.identity.owner_major_id().clone(),
         };
+        let server_scope = config.identity.scope().clone();
 
         Self {
             inner: Arc::new(RwLock::new(StateInner {
@@ -126,6 +139,7 @@ impl StateManager {
             config,
             write_verifier,
             server_owner,
+            server_scope,
         }
     }
 }
