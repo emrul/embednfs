@@ -290,6 +290,10 @@ impl<F: FileSystem> NfsServer<F> {
                                 }
                                 Createhow4::Exclusive(_) => Default::default(),
                             };
+                            if let Err(status) = self.recall_directory_delegations(&container).await
+                            {
+                                return NfsResop4::Open(status, None);
+                            }
                             match self
                                 .create_file(request_ctx, *dir_id, name, set_attrs)
                                 .await
@@ -355,6 +359,10 @@ impl<F: FileSystem> NfsServer<F> {
                                 }
                                 Createhow4::Exclusive(_) => Default::default(),
                             };
+                            if let Err(status) = self.recall_directory_delegations(&container).await
+                            {
+                                return NfsResop4::Open(status, None);
+                            }
                             let mut initial = vec![];
                             if let Some(size) = set_attrs.size {
                                 initial.resize(size as usize, 0);

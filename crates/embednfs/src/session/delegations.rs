@@ -1,11 +1,16 @@
 use std::sync::atomic::Ordering;
 
-use embednfs_proto::{Clientid4, NfsStat4, Sessionid4, Stateid4};
+use embednfs_proto::{
+    Clientid4, NfsStat4, SEQ4_STATUS_RECALLABLE_STATE_REVOKED, Sessionid4, Stateid4,
+};
 
 use crate::internal::ServerObject;
 
 use super::StateManager;
-use super::model::{DelegationKind, DelegationState, DelegationStatus, StateInner};
+use super::model::{
+    DelegationKind, DelegationState, DelegationStatus, DirectoryDelegationGrant,
+    DirectoryDelegationRecall, StateInner,
+};
 
 impl StateManager {
     /// Create or reuse a read-only directory delegation stateid.
@@ -67,6 +72,84 @@ impl StateManager {
         Ok(Stateid4 { seqid: 1, other })
     }
 
+    /// Grant a read-only directory delegation when the client and server
+    /// limits allow it.
+    pub(crate) async fn grant_directory_delegation(
+        &self,
+        object: ServerObject,
+        clientid: Clientid4,
+        sessionid: Option<Sessionid4>,
+        max_per_client: usize,
+        max_total: usize,
+    ) -> Result<DirectoryDelegationGrant, NfsStat4> {
+        self.reap_expired_clients().await;
+        let mut inner = self.inner.write().await;
+
+        if Self::find_live_directory_delegation(&inner, &object, clientid).is_some() {
+            return Ok(DirectoryDelegationGrant::AlreadyHeld);
+        }
+        if Self::has_recall_in_progress(&inner, &object) {
+            return Ok(DirectoryDelegationGrant::Unavailable);
+        }
+
+        let client_count = inner
+            .client_delegations
+            .get(&clientid)
+            .map(|others| {
+                others
+                    .iter()
+                    .filter(|other| Self::is_live_delegation(&inner, other))
+                    .count()
+            })
+            .unwrap_or_default();
+        if client_count >= max_per_client {
+            return Ok(DirectoryDelegationGrant::Unavailable);
+        }
+
+        let total = inner
+            .delegations
+            .values()
+            .filter(|state| Self::is_live_delegation_status(state.status))
+            .count();
+        if total >= max_total {
+            return Ok(DirectoryDelegationGrant::Unavailable);
+        }
+
+        let seq = self.next_stateid.fetch_add(1, Ordering::Relaxed);
+        let mut other = [0u8; 12];
+        other[..4].copy_from_slice(&seq.to_be_bytes());
+        other[4..12].copy_from_slice(&clientid.to_be_bytes());
+
+        let _ = inner.delegations.insert(
+            other,
+            DelegationState {
+                object: object.clone(),
+                clientid,
+                sessionid,
+                stateid_seq: 1,
+                kind: DelegationKind::DirectoryRead,
+                status: DelegationStatus::Granted,
+                granted_at: self.config.now(),
+                last_recall_at: None,
+            },
+        );
+        let _ = inner
+            .dir_delegations
+            .entry(object)
+            .or_default()
+            .insert(other);
+        let _ = inner
+            .client_delegations
+            .entry(clientid)
+            .or_default()
+            .insert(other);
+
+        Ok(DirectoryDelegationGrant::Granted(Stateid4 {
+            seqid: 1,
+            other,
+        }))
+    }
+
     /// Return a delegation stateid and remove it from all indexes.
     pub(crate) async fn return_delegation_state(
         &self,
@@ -121,6 +204,83 @@ impl StateManager {
             .ok_or(NfsStat4::BadStateid)?;
         Self::validate_stateid_seq(state.stateid_seq, stateid.seqid)?;
         state.status = DelegationStatus::Revoked;
+        Ok(())
+    }
+
+    /// Mark granted delegations for a directory as being recalled.
+    pub(crate) async fn begin_directory_recall(
+        &self,
+        object: &ServerObject,
+    ) -> Vec<DirectoryDelegationRecall> {
+        self.reap_expired_clients().await;
+        let mut inner = self.inner.write().await;
+        let now = self.config.now();
+        let others = inner
+            .dir_delegations
+            .get(object)
+            .cloned()
+            .unwrap_or_default();
+        let mut recalls = Vec::with_capacity(others.len());
+
+        for other in others {
+            let Some(state) = inner.delegations.get_mut(&other) else {
+                continue;
+            };
+            if state.kind != DelegationKind::DirectoryRead {
+                continue;
+            }
+            let send_callback = match state.status {
+                DelegationStatus::Granted => {
+                    state.status = DelegationStatus::RecallInProgress;
+                    state.last_recall_at = Some(now);
+                    true
+                }
+                DelegationStatus::RecallInProgress => false,
+                DelegationStatus::Returned | DelegationStatus::Revoked => continue,
+            };
+            recalls.push(DirectoryDelegationRecall {
+                stateid: Stateid4 {
+                    seqid: state.stateid_seq,
+                    other,
+                },
+                clientid: state.clientid,
+                send_callback,
+            });
+        }
+
+        recalls
+    }
+
+    /// Return whether a recalled delegation is no longer outstanding.
+    pub(crate) async fn delegation_recall_complete(&self, stateid: &Stateid4) -> bool {
+        let inner = self.inner.read().await;
+        !inner.delegations.get(&stateid.other).is_some_and(|state| {
+            matches!(
+                state.status,
+                DelegationStatus::Granted | DelegationStatus::RecallInProgress
+            )
+        })
+    }
+
+    /// Revoke a recallable delegation and set the client's SEQUENCE status bit.
+    pub(crate) async fn revoke_recallable_delegation(
+        &self,
+        stateid: &Stateid4,
+    ) -> Result<(), NfsStat4> {
+        self.reap_expired_clients().await;
+        let mut inner = self.inner.write().await;
+        let clientid = {
+            let state = inner
+                .delegations
+                .get_mut(&stateid.other)
+                .ok_or(NfsStat4::BadStateid)?;
+            Self::validate_stateid_seq(state.stateid_seq, stateid.seqid)?;
+            state.status = DelegationStatus::Revoked;
+            state.clientid
+        };
+        if let Some(client) = inner.clients.get_mut(&clientid) {
+            client.status_flags |= SEQ4_STATUS_RECALLABLE_STATE_REVOKED;
+        }
         Ok(())
     }
 
@@ -184,6 +344,31 @@ impl StateManager {
                         )
                 })
             })
+    }
+
+    fn has_recall_in_progress(inner: &StateInner, object: &ServerObject) -> bool {
+        inner.dir_delegations.get(object).is_some_and(|others| {
+            others.iter().any(|other| {
+                inner
+                    .delegations
+                    .get(other)
+                    .is_some_and(|state| state.status == DelegationStatus::RecallInProgress)
+            })
+        })
+    }
+
+    fn is_live_delegation(inner: &StateInner, other: &[u8; 12]) -> bool {
+        inner
+            .delegations
+            .get(other)
+            .is_some_and(|state| Self::is_live_delegation_status(state.status))
+    }
+
+    fn is_live_delegation_status(status: DelegationStatus) -> bool {
+        matches!(
+            status,
+            DelegationStatus::Granted | DelegationStatus::RecallInProgress
+        )
     }
 
     pub(super) fn delegation_test_status(state: &DelegationState, stateid: &Stateid4) -> NfsStat4 {

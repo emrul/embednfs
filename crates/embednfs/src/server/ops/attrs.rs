@@ -104,10 +104,36 @@ impl<F: FileSystem> NfsServer<F> {
             Err(status) => return NfsResop4::Setattr(status, Bitmap4::new()),
         };
 
-        if let Some(new_size) = set_attrs.size {
-            let current_attr = match self.build_attr(request_ctx, &object).await {
-                Ok(attr) => attr,
+        let current_attr = if set_attrs.size.is_some()
+            || (self.delegation_config.directory_delegations && !set_attrs.is_empty())
+        {
+            match self.build_attr(request_ctx, &object).await {
+                Ok(attr) => Some(attr),
                 Err(e) => return NfsResop4::Setattr(e.to_nfsstat4(), Bitmap4::new()),
+            }
+        } else {
+            None
+        };
+        if let Some(attr) = &current_attr
+            && matches!(
+                attr.file_type,
+                ServerFileType::Directory | ServerFileType::NamedAttrDir
+            )
+        {
+            if set_attrs.size.is_some() {
+                return NfsResop4::Setattr(NfsStat4::Isdir, Bitmap4::new());
+            }
+            if !set_attrs.is_empty()
+                && let Err(status) = self.recall_directory_delegations(&object).await
+            {
+                return NfsResop4::Setattr(status, Bitmap4::new());
+            }
+        }
+
+        if let Some(new_size) = set_attrs.size {
+            let current_attr = match &current_attr {
+                Some(attr) => attr,
+                None => return NfsResop4::Setattr(NfsStat4::Serverfault, Bitmap4::new()),
             };
             let offset = current_attr.size.min(new_size);
             let length = current_attr.size.max(new_size) - offset;

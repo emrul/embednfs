@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use embednfs_proto::{
-    ClientOwner4, Clientid4, NfsLockType4, SequenceRes4, Sequenceid4, Sessionid4, Slotid4,
-    StateOwner4, Verifier4,
+    ClientOwner4, Clientid4, NfsLockType4, OpaqueAuth, SequenceRes4, Sequenceid4, Sessionid4,
+    Slotid4, StateOwner4, Stateid4, Verifier4,
 };
 
 use crate::internal::ServerObject;
@@ -97,10 +97,6 @@ pub(super) enum DelegationKind {
     DirectoryRead,
 }
 
-#[expect(
-    dead_code,
-    reason = "recall and revocation phases will construct every delegation status"
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DelegationStatus {
     Granted,
@@ -127,6 +123,7 @@ pub(super) struct ClientState {
     pub confirmed: bool,
     pub reclaim_complete_global: bool,
     pub sequence_id: Sequenceid4,
+    pub status_flags: u32,
     pub replaced_clientid: Option<Clientid4>,
     pub lease_state: ClientLeaseState,
     /// Server-issued confirmation verifier awaiting a matching
@@ -145,6 +142,39 @@ pub(super) struct SessionState {
     pub clientid: Clientid4,
     pub slots: Vec<SlotState>,
     pub connections: HashSet<u64>,
+    pub backchannel: Option<BackchannelState>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct BackchannelState {
+    pub cb_program: u32,
+    pub auth: OpaqueAuth,
+    pub next_sequenceid: Sequenceid4,
+    pub highest_slotid: Slotid4,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CallbackTarget {
+    pub sessionid: Sessionid4,
+    pub connection_id: u64,
+    pub cb_program: u32,
+    pub auth: OpaqueAuth,
+    pub sequenceid: Sequenceid4,
+    pub highest_slotid: Slotid4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectoryDelegationGrant {
+    Granted(Stateid4),
+    AlreadyHeld,
+    Unavailable,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DirectoryDelegationRecall {
+    pub stateid: Stateid4,
+    pub clientid: Clientid4,
+    pub send_callback: bool,
 }
 
 #[derive(Clone)]

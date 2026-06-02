@@ -57,6 +57,7 @@ impl StateManager {
             let _ = session.connections.insert(connection_id);
             return SequenceReplay::StatusOnly(Self::sequence_res(session, args, status_flags));
         }
+        let status_flags = client.status_flags;
 
         let replay = {
             let Some(session) = inner.sessions.get_mut(&args.sessionid) else {
@@ -70,7 +71,7 @@ impl StateManager {
                 slot.sequence_id = slot.sequence_id.wrapping_add(1);
                 slot.in_progress = Some(fingerprint.to_vec());
                 slot.cached_reply = None;
-                let res = Self::sequence_res(session, args, 0);
+                let res = Self::sequence_res(session, args, status_flags);
                 SequenceReplay::Execute(
                     res,
                     SequenceCacheToken {

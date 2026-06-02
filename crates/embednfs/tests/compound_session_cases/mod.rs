@@ -6,6 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::common::*;
 
+mod delegation;
 mod lifecycle;
 mod misc;
 mod protocol_sequence;

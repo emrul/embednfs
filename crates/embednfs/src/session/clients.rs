@@ -1,16 +1,20 @@
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use embednfs_proto::xdr::XdrEncode;
 use embednfs_proto::{
-    BindConnToSessionArgs4, BindConnToSessionRes4, ChannelAttrs4, Clientid4, CreateSessionArgs4,
-    CreateSessionRes4, EXCHGID4_FLAG_CONFIRMED_R, EXCHGID4_FLAG_USE_NON_PNFS, ExchangeIdArgs4,
-    ExchangeIdRes4, NfsImplId4, NfsStat4, NfsTime4, OpenClaim4,
-    SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED, Sessionid4, SetClientIdArgs4, SetClientIdConfirmArgs4,
-    SetClientIdRes4, StateProtect4R, Verifier4,
+    AuthFlavor, BindConnToSessionArgs4, BindConnToSessionRes4, CallbackSecParms4, ChannelAttrs4,
+    Clientid4, CreateSessionArgs4, CreateSessionRes4, EXCHGID4_FLAG_CONFIRMED_R,
+    EXCHGID4_FLAG_USE_NON_PNFS, ExchangeIdArgs4, ExchangeIdRes4, NfsImplId4, NfsStat4, NfsTime4,
+    OpaqueAuth, OpenClaim4, SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED, Sessionid4, SetClientIdArgs4,
+    SetClientIdConfirmArgs4, SetClientIdRes4, StateProtect4R, Verifier4,
 };
 
-use super::model::{ClientLeaseState, ClientState, SessionState, SlotState, StateInner};
+use super::model::{
+    BackchannelState, CallbackTarget, ClientLeaseState, ClientState, SessionState, SlotState,
+    StateInner,
+};
 use super::{MAX_CACHED_RESPONSE, MAX_FORE_CHAN_SLOTS, MAX_REQUEST_SIZE, StateManager};
 
 impl StateManager {
@@ -81,6 +85,7 @@ impl StateManager {
                     confirmed: false,
                     reclaim_complete_global: false,
                     sequence_id: 1,
+                    status_flags: 0,
                     replaced_clientid: old_clientid,
                     lease_state: ClientLeaseState::Active {
                         deadline: self.lease_deadline(now),
@@ -138,6 +143,7 @@ impl StateManager {
             }
             client.sequence_id += 1;
             client.confirmed = true;
+            client.status_flags = 0;
             client.lease_state = ClientLeaseState::Active {
                 deadline: self.lease_deadline(now),
             };
@@ -191,6 +197,7 @@ impl StateManager {
                 clientid: args.clientid,
                 slots,
                 connections: HashSet::from([connection_id]),
+                backchannel: callback_backchannel(args, &back_chan),
             },
         );
 
@@ -264,6 +271,47 @@ impl StateManager {
             .sessions
             .get(sessionid)
             .map(|session| session.clientid)
+    }
+
+    pub(crate) async fn callback_connection_ids(&self, clientid: Clientid4) -> Vec<u64> {
+        let inner = self.inner.read().await;
+        inner
+            .sessions
+            .values()
+            .filter(|session| session.clientid == clientid && session.backchannel.is_some())
+            .flat_map(|session| session.connections.iter().copied())
+            .collect()
+    }
+
+    pub(crate) async fn next_callback_target_on(
+        &self,
+        clientid: Clientid4,
+        connection_id: u64,
+    ) -> Option<CallbackTarget> {
+        let mut inner = self.inner.write().await;
+        let (sessionid, session) = inner.sessions.iter_mut().find(|(_, session)| {
+            session.clientid == clientid
+                && session.backchannel.is_some()
+                && session.connections.contains(&connection_id)
+        })?;
+        let backchannel = session.backchannel.as_mut()?;
+        let sequenceid = backchannel.next_sequenceid;
+        backchannel.next_sequenceid = backchannel.next_sequenceid.wrapping_add(1).max(1);
+        Some(CallbackTarget {
+            sessionid: *sessionid,
+            connection_id,
+            cb_program: backchannel.cb_program,
+            auth: backchannel.auth.clone(),
+            sequenceid,
+            highest_slotid: backchannel.highest_slotid,
+        })
+    }
+
+    pub(crate) async fn remove_connection(&self, connection_id: u64) {
+        let mut inner = self.inner.write().await;
+        for session in inner.sessions.values_mut() {
+            let _ = session.connections.remove(&connection_id);
+        }
     }
 
     pub(crate) async fn reclaim_complete(
@@ -432,6 +480,7 @@ impl StateManager {
                     confirmed: false,
                     reclaim_complete_global: false,
                     sequence_id: 1,
+                    status_flags: 0,
                     replaced_clientid: None,
                     lease_state: ClientLeaseState::Active {
                         deadline: self.lease_deadline(now),
@@ -467,6 +516,7 @@ impl StateManager {
             Some(expected) if expected == args.verifier => {
                 client.v40_confirm = None;
                 client.confirmed = true;
+                client.status_flags = 0;
                 client.lease_state = ClientLeaseState::Active {
                     deadline: self.lease_deadline(now),
                 };
@@ -524,4 +574,38 @@ impl StateManager {
                 .any(|state| state.owner.clientid == clientid)
             || Self::has_live_client_delegations(inner, clientid)
     }
+}
+
+fn callback_backchannel(
+    args: &CreateSessionArgs4,
+    response_back_chan: &ChannelAttrs4,
+) -> Option<BackchannelState> {
+    let auth = callback_auth(&args.sec_parms)?;
+    if args.cb_program == 0 {
+        return None;
+    }
+    Some(BackchannelState {
+        cb_program: args.cb_program,
+        auth,
+        next_sequenceid: 1,
+        highest_slotid: response_back_chan.maxrequests.saturating_sub(1),
+    })
+}
+
+fn callback_auth(sec_parms: &[CallbackSecParms4]) -> Option<OpaqueAuth> {
+    for sec_parm in sec_parms {
+        match sec_parm {
+            CallbackSecParms4::None => return Some(OpaqueAuth::null()),
+            CallbackSecParms4::Sys(params) => {
+                let mut body = BytesMut::new();
+                params.encode(&mut body);
+                return Some(OpaqueAuth {
+                    flavor: AuthFlavor::Sys as u32,
+                    body: body.freeze(),
+                });
+            }
+            CallbackSecParms4::RpcSecGss(_) => {}
+        }
+    }
+    None
 }

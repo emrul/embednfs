@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tracing::{trace, warn};
 
 use embednfs_proto::xdr::*;
@@ -28,26 +29,34 @@ impl<F: FileSystem> NfsServer<F> {
         clippy::indexing_slicing,
         reason = "fragment lengths and replay body offsets are validated before slicing"
     )]
-    #[expect(
-        clippy::expect_used,
-        reason = "each outbound fragment must fit the RFC 5531 fragment length field"
-    )]
     pub(super) async fn handle_connection(
         self: &std::sync::Arc<Self>,
         stream: TcpStream,
     ) -> std::io::Result<()> {
         let connection_id = self.state.alloc_connection_id();
         let (mut reader, writer) = stream.into_split();
-        let mut writer = BufWriter::with_capacity(CONN_BUF_SIZE, writer);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        self.backchannels
+            .register_connection(connection_id, outbound_tx.clone());
+        let writer_task = tokio::spawn(async move { write_records(writer, outbound_rx).await });
+
+        let mut read_result = Ok(());
         loop {
             let mut record = BytesMut::with_capacity(CONN_BUF_SIZE);
+            let mut close_connection = false;
 
             loop {
                 let mut header = [0u8; 4];
                 match reader.read_exact(&mut header).await {
                     Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-                    Err(e) => return Err(e),
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        read_result = Ok(());
+                        break;
+                    }
+                    Err(e) => {
+                        read_result = Err(e);
+                        break;
+                    }
                 }
                 let header_val = u32::from_be_bytes(header);
                 let last_fragment = (header_val & RPC_LAST_FRAGMENT) != 0;
@@ -55,7 +64,8 @@ impl<F: FileSystem> NfsServer<F> {
 
                 if frag_len > MAX_FRAGMENT_SIZE {
                     warn!("Fragment too large: {frag_len}");
-                    return Ok(());
+                    close_connection = true;
+                    break;
                 }
 
                 let record_len = record.len();
@@ -66,43 +76,50 @@ impl<F: FileSystem> NfsServer<F> {
                             "RPC record exceeds configured limit: current={}, incoming={}",
                             record_len, frag_len
                         );
-                        return Ok(());
+                        close_connection = true;
+                        break;
                     }
                 };
                 record.resize(new_len, 0);
-                let _ = reader.read_exact(&mut record[record_len..new_len]).await?;
+                if let Err(e) = reader.read_exact(&mut record[record_len..new_len]).await {
+                    read_result = Err(e);
+                    break;
+                }
 
                 if last_fragment {
                     break;
                 }
             }
 
-            let Some(response) = self
-                .process_rpc_message(record.freeze(), connection_id)
-                .await
-            else {
-                return Ok(());
-            };
-
-            let mut response = response;
-            while !response.is_empty() {
-                let frag_len = response.len().min(MAX_FRAGMENT_SIZE);
-                let last_fragment = frag_len == response.len();
-                let fragment = response.split_to(frag_len);
-                let resp_len = u32::try_from(fragment.len())
-                    .ok()
-                    .filter(|len| *len <= RPC_FRAG_LEN_MASK)
-                    .expect("response exceeds RPC fragment limit");
-                let resp_len = if last_fragment {
-                    resp_len | RPC_LAST_FRAGMENT
-                } else {
-                    resp_len
-                };
-                writer.write_all(&resp_len.to_be_bytes()).await?;
-                writer.write_all(&fragment).await?;
+            if read_result.is_err() || close_connection || record.is_empty() {
+                break;
             }
-            writer.flush().await?;
+
+            let record = record.freeze();
+            if rpc_message_type(&record) == Some(MsgType::Reply) {
+                if !self.backchannels.handle_reply(connection_id, record) {
+                    warn!("unexpected RPC reply on connection {connection_id}");
+                }
+                continue;
+            }
+
+            let server = self.clone();
+            let response_tx = outbound_tx.clone();
+            std::mem::drop(tokio::spawn(async move {
+                let Some(response) = server.process_rpc_message(record, connection_id).await else {
+                    return;
+                };
+                let _ = response_tx.send(response);
+            }));
         }
+
+        self.backchannels.unregister_connection(connection_id);
+        self.state.remove_connection(connection_id).await;
+        drop(outbound_tx);
+        if let Err(e) = writer_task.await {
+            warn!("writer task failed for connection {connection_id}: {e}");
+        }
+        read_result
     }
 
     pub(super) async fn process_rpc_message(
@@ -227,4 +244,41 @@ impl<F: FileSystem> NfsServer<F> {
         );
         Some(response)
     }
+}
+
+fn rpc_message_type(record: &Bytes) -> Option<MsgType> {
+    let mut src = record.clone();
+    let _xid = u32::decode(&mut src).ok()?;
+    MsgType::decode(&mut src).ok()
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "each outbound fragment must fit the RFC 5531 fragment length field"
+)]
+async fn write_records(
+    writer: tokio::net::tcp::OwnedWriteHalf,
+    mut outbound_rx: mpsc::UnboundedReceiver<Bytes>,
+) -> std::io::Result<()> {
+    let mut writer = BufWriter::with_capacity(CONN_BUF_SIZE, writer);
+    while let Some(mut response) = outbound_rx.recv().await {
+        while !response.is_empty() {
+            let frag_len = response.len().min(MAX_FRAGMENT_SIZE);
+            let last_fragment = frag_len == response.len();
+            let fragment = response.split_to(frag_len);
+            let resp_len = u32::try_from(fragment.len())
+                .ok()
+                .filter(|len| *len <= RPC_FRAG_LEN_MASK)
+                .expect("response exceeds RPC fragment limit");
+            let resp_len = if last_fragment {
+                resp_len | RPC_LAST_FRAGMENT
+            } else {
+                resp_len
+            };
+            writer.write_all(&resp_len.to_be_bytes()).await?;
+            writer.write_all(&fragment).await?;
+        }
+        writer.flush().await?;
+    }
+    Ok(())
 }

@@ -44,6 +44,9 @@ impl<F: FileSystem> NfsServer<F> {
         if let Err(status) = self.validate_component_name(&args.objname) {
             return NfsResop4::Create(status, None, Bitmap4::new());
         }
+        if let Err(status) = self.recall_directory_delegations(&dir_object).await {
+            return NfsResop4::Create(status, None, Bitmap4::new());
+        }
 
         let (new_object, _new_type) = match &args.objtype {
             Createtype4::Reg => {
@@ -128,6 +131,9 @@ impl<F: FileSystem> NfsServer<F> {
             Err(e) => return NfsResop4::Link(e.to_nfsstat4(), None),
         };
         if let Err(status) = self.validate_component_name(&args.newname) {
+            return NfsResop4::Link(status, None);
+        }
+        if let Err(status) = self.recall_directory_delegations(&target_dir).await {
             return NfsResop4::Link(status, None);
         }
 
@@ -498,6 +504,13 @@ impl<F: FileSystem> NfsServer<F> {
         if let Err(status) = self.validate_component_name(&args.target) {
             return NfsResop4::Remove(status, None);
         }
+        if matches!(
+            dir_attr_before.file_type,
+            ServerFileType::Directory | ServerFileType::NamedAttrDir
+        ) && let Err(status) = self.recall_directory_delegations(&dir_object).await
+        {
+            return NfsResop4::Remove(status, None);
+        }
 
         let status = match dir_object.clone() {
             ServerObject::Fs(dir_id) => {
@@ -577,6 +590,14 @@ impl<F: FileSystem> NfsServer<F> {
             Ok(attr) => attr,
             Err(e) => return NfsResop4::Rename(e.to_nfsstat4(), None, None),
         };
+        if let Err(status) = self.recall_directory_delegations(&src_object).await {
+            return NfsResop4::Rename(status, None, None);
+        }
+        if src_object != tgt_object
+            && let Err(status) = self.recall_directory_delegations(&tgt_object).await
+        {
+            return NfsResop4::Rename(status, None, None);
+        }
 
         match self
             .rename(

@@ -1,4 +1,5 @@
 mod attrs;
+mod delegation;
 mod directory;
 mod file;
 mod locking;

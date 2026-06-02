@@ -85,6 +85,10 @@ pub fn encode_exchange_id_with_ssv(
 }
 
 pub fn encode_create_session(clientid: u64, seq: u32) -> Vec<u8> {
+    encode_create_session_with_callback(clientid, seq, 0)
+}
+
+pub fn encode_create_session_with_callback(clientid: u64, seq: u32, cb_program: u32) -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_CREATE_SESSION.encode(&mut buf);
     clientid.encode(&mut buf);
@@ -107,7 +111,7 @@ pub fn encode_create_session(clientid: u64, seq: u32) -> Vec<u8> {
     1u32.encode(&mut buf);
     0u32.encode(&mut buf);
 
-    0u32.encode(&mut buf);
+    cb_program.encode(&mut buf);
     1u32.encode(&mut buf);
     0u32.encode(&mut buf);
     buf.to_vec()
@@ -672,6 +676,20 @@ pub fn encode_delegpurge() -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_DELEGPURGE.encode(&mut buf);
     0u64.encode(&mut buf);
+    buf.to_vec()
+}
+
+pub fn encode_get_dir_delegation() -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_GET_DIR_DELEGATION.encode(&mut buf);
+    false.encode(&mut buf);
+    Bitmap4::new().encode(&mut buf);
+    0u64.encode(&mut buf);
+    0u32.encode(&mut buf);
+    0u64.encode(&mut buf);
+    0u32.encode(&mut buf);
+    Bitmap4::new().encode(&mut buf);
+    Bitmap4::new().encode(&mut buf);
     buf.to_vec()
 }
 

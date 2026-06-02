@@ -61,7 +61,10 @@ impl Default for StateConfig {
 }
 
 use model::StateInner;
-pub(crate) use model::{ResolvedStateid, SequenceReplay, SynthMeta};
+pub(crate) use model::{
+    CallbackTarget, DirectoryDelegationGrant, DirectoryDelegationRecall, ResolvedStateid,
+    SequenceReplay, SynthMeta,
+};
 pub(crate) use stateids::{CurrentStateidMode, NormalizedStateid};
 
 /// Manages all server-side state.

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 
-use embednfs::{FileSystem, MemFs, NfsServer};
+use embednfs::{DelegationConfig, FileSystem, MemFs, NfsServer};
 
 pub async fn start_server() -> u16 {
     start_server_with_fs(MemFs::new()).await
@@ -16,6 +16,13 @@ pub async fn start_server_with_fs<F: FileSystem>(fs: F) -> u16 {
 pub async fn start_server_with_directory_delegations() -> u16 {
     let server = NfsServer::builder(MemFs::new())
         .directory_delegations(true)
+        .build();
+    start_server_instance(server).await
+}
+
+pub async fn start_server_with_delegation_config(config: DelegationConfig) -> u16 {
+    let server = NfsServer::builder(MemFs::new())
+        .delegation_config(config)
         .build();
     start_server_instance(server).await
 }

@@ -2,7 +2,9 @@ use tokio::net::TcpStream;
 
 use embednfs_proto::{NfsStat4, OP_CREATE_SESSION, OP_EXCHANGE_ID};
 
-use super::encode::{encode_compound, encode_create_session, encode_exchange_id};
+use super::encode::{
+    encode_compound, encode_create_session, encode_create_session_with_callback, encode_exchange_id,
+};
 use super::parse::{
     parse_compound_header, parse_create_session_res, parse_op_header, parse_rpc_reply_fields,
     skip_exchange_id_res,
@@ -10,6 +12,14 @@ use super::parse::{
 use super::transport::send_rpc;
 
 pub async fn setup_session(stream: &mut TcpStream) -> [u8; 16] {
+    setup_session_with_cb_program(stream, 0).await
+}
+
+pub async fn setup_session_with_callback(stream: &mut TcpStream, cb_program: u32) -> [u8; 16] {
+    setup_session_with_cb_program(stream, cb_program).await
+}
+
+async fn setup_session_with_cb_program(stream: &mut TcpStream, cb_program: u32) -> [u8; 16] {
     let exchange_id_op = encode_exchange_id();
     let compound = encode_compound("exchange", &[&exchange_id_op]);
     let mut resp = send_rpc(stream, 1, 1, &compound).await;
@@ -23,7 +33,11 @@ pub async fn setup_session(stream: &mut TcpStream) -> [u8; 16] {
     assert_eq!(op_status, NfsStat4::Ok as u32);
     let (clientid, sequenceid) = skip_exchange_id_res(&mut resp);
 
-    let create_session_op = encode_create_session(clientid, sequenceid);
+    let create_session_op = if cb_program == 0 {
+        encode_create_session(clientid, sequenceid)
+    } else {
+        encode_create_session_with_callback(clientid, sequenceid, cb_program)
+    };
     let compound = encode_compound("create-session", &[&create_session_op]);
     let mut resp = send_rpc(stream, 2, 1, &compound).await;
     let (_, accept_stat) = parse_rpc_reply_fields(&mut resp);

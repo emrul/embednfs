@@ -25,6 +25,7 @@ const CONN_BUF_SIZE: usize = 65_536;
 
 type NfsResult<T> = FsResult<T>;
 
+mod backchannel;
 mod compound;
 mod file_attrs;
 mod objects;
@@ -89,6 +90,7 @@ impl<F: FileSystem> NfsServerBuilder<F> {
             next_object_id: AtomicU64::new(1),
             id_mapper: self.id_mapper,
             delegation_config: self.delegation_config,
+            backchannels: Arc::new(backchannel::BackchannelManager::default()),
         }
     }
 }
@@ -126,6 +128,7 @@ pub struct NfsServer<F: FileSystem> {
     next_object_id: AtomicU64,
     id_mapper: Arc<dyn IdMapper>,
     delegation_config: DelegationConfig,
+    backchannels: Arc<backchannel::BackchannelManager>,
 }
 
 impl<F: FileSystem> NfsServer<F> {

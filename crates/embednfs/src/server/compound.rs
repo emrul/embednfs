@@ -138,6 +138,7 @@ impl<F: FileSystem> NfsServer<F> {
                             request_ctx,
                             connection_id,
                             leading_sequence_clientid,
+                            leading_sequence_sessionid,
                         )
                         .await
                     }
@@ -149,6 +150,7 @@ impl<F: FileSystem> NfsServer<F> {
                     request_ctx,
                     connection_id,
                     leading_sequence_clientid,
+                    leading_sequence_sessionid,
                 )
                 .await
             };
@@ -180,6 +182,7 @@ impl<F: FileSystem> NfsServer<F> {
         request_ctx: &RequestContext,
         connection_id: u64,
         sequence_clientid: Option<Clientid4>,
+        sequence_sessionid: Option<Sessionid4>,
     ) -> NfsResop4 {
         match op {
             NfsArgop4::Access(args) => self.op_access(request_ctx, args, &state.current_fh).await,
@@ -485,7 +488,16 @@ impl<F: FileSystem> NfsServer<F> {
             NfsArgop4::LayoutGet => NfsResop4::LayoutGet(NfsStat4::Notsupp, None),
             NfsArgop4::LayoutReturn => NfsResop4::LayoutReturn(NfsStat4::Notsupp, None),
             NfsArgop4::LayoutCommit => NfsResop4::LayoutCommit(NfsStat4::Notsupp, None),
-            NfsArgop4::GetDirDelegation => NfsResop4::GetDirDelegation(NfsStat4::Notsupp, None),
+            NfsArgop4::GetDirDelegation => {
+                self.op_get_dir_delegation(
+                    request_ctx,
+                    &state.current_fh,
+                    state.minorversion,
+                    sequence_clientid,
+                    sequence_sessionid,
+                )
+                .await
+            }
             NfsArgop4::WantDelegation => NfsResop4::WantDelegation(NfsStat4::Notsupp, None),
             NfsArgop4::BackchannelCtl => NfsResop4::BackchannelCtl(NfsStat4::Notsupp),
             NfsArgop4::GetDeviceInfo => NfsResop4::GetDeviceInfo(NfsStat4::Notsupp, None),
@@ -524,6 +536,9 @@ fn returned_stateid(res: &NfsResop4) -> Option<Stateid4> {
         NfsResop4::Lock(NfsStat4::Ok, Some(stateid), _) => Some(*stateid),
         NfsResop4::Locku(NfsStat4::Ok, Some(stateid)) => Some(*stateid),
         NfsResop4::OpenDowngrade(NfsStat4::Ok, Some(stateid)) => Some(*stateid),
+        NfsResop4::GetDirDelegation(NfsStat4::Ok, Some(GetDirDelegationRes4::Ok(ok))) => {
+            Some(ok.stateid)
+        }
         _ => None,
     }
 }
