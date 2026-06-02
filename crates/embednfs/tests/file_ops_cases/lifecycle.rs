@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 // ===== OPEN + CLOSE (pynfs OPEN, CLOSE) =====
 
@@ -182,6 +184,133 @@ async fn test_close_bad_stateid() {
     assert_eq!(opnum, OP_CLOSE);
     assert_eq!(status, op_status);
     assert_eq!(op_status, NfsStat4::BadStateid as u32);
+}
+
+/// NFSv4.0 write OPEN_CONFIRM flow publishes one write-open and final close.
+/// Origin: regression coverage for Linux NFSv4.0 fallback lifecycle callbacks.
+/// RFC: RFC 7530 §16.18; RFC 8881 §18.2, §18.32.
+#[tokio::test]
+async fn test_v40_open_confirm_write_close_lifecycle_hooks() {
+    let counts = Arc::new(OpenLifecycleCounts::default());
+    let fs = OpenLifecycleFs {
+        inner: MemFs::new(),
+        counts: counts.clone(),
+    };
+    let port = start_server_with_fs(fs).await;
+    let mut stream = connect(port).await;
+
+    let setclientid_op = encode_setclientid(&[4, 0, 0, 0, 0, 0, 0, 1], b"v40-lifecycle-client");
+    let compound = encode_compound_minor("v40-setclientid", 0, &[&setclientid_op]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_SETCLIENTID);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (clientid, confirm_verifier) = parse_setclientid_res(&mut resp);
+
+    let confirm_client_op = encode_setclientid_confirm(clientid, &confirm_verifier);
+    let compound = encode_compound_minor("v40-setclientid-confirm", 0, &[&confirm_client_op]);
+    let mut resp = send_rpc(&mut stream, 2, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 1);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_SETCLIENTID_CONFIRM);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+
+    let putrootfh_op = encode_putrootfh();
+    let open_op = encode_open_create_with_clientid(
+        "v40-lifecycle.txt",
+        clientid,
+        OPEN4_SHARE_ACCESS_BOTH,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    let getfh_op = encode_getfh();
+    let compound = encode_compound_minor("v40-open", 0, &[&putrootfh_op, &open_op, &getfh_op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 3);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTROOTFH);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_OPEN);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let open_stateid = skip_open_res(&mut resp);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_GETFH);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let fh = parse_getfh(&mut resp);
+    assert_eq!(counts.write_open_count.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.non_write_open_count.load(Ordering::Relaxed), 0);
+    assert_eq!(counts.last_writer_close_count.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        counts.non_last_writer_close_count.load(Ordering::Relaxed),
+        0
+    );
+
+    let putfh_op = encode_putfh(&fh);
+    let open_confirm_op = encode_open_confirm_stateid(&open_stateid);
+    let compound = encode_compound_minor("v40-open-confirm", 0, &[&putfh_op, &open_confirm_op]);
+    let mut resp = send_rpc(&mut stream, 4, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 2);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTFH);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_OPEN_CONFIRM);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let confirmed_stateid = parse_stateid(&mut resp);
+
+    let putfh_op = encode_putfh(&fh);
+    let write_op = encode_write(&confirmed_stateid, 0, b"confirmed-write");
+    let compound = encode_compound_minor("v40-write", 0, &[&putfh_op, &write_op]);
+    let mut resp = send_rpc(&mut stream, 5, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 2);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTFH);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_WRITE);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (written, committed) = parse_write_res(&mut resp);
+    assert_eq!(written, b"confirmed-write".len() as u32);
+    assert_eq!(committed, FILE_SYNC4);
+
+    let putfh_op = encode_putfh(&fh);
+    let close_op = encode_close(&confirmed_stateid);
+    let compound = encode_compound_minor("v40-close", 0, &[&putfh_op, &close_op]);
+    let mut resp = send_rpc(&mut stream, 6, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, num_results) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    assert_eq!(num_results, 2);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTFH);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_CLOSE);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+
+    assert_eq!(counts.write_open_count.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.non_write_open_count.load(Ordering::Relaxed), 0);
+    assert_eq!(counts.last_writer_close_count.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        counts.non_last_writer_close_count.load(Ordering::Relaxed),
+        0
+    );
 }
 
 // ===== READ (pynfs RD) =====

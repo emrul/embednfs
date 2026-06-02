@@ -330,12 +330,21 @@ pub fn encode_open_create_guarded(name: &str) -> Vec<u8> {
 }
 
 pub fn encode_open_create_with_access(name: &str, share_access: u32, share_deny: u32) -> Vec<u8> {
+    encode_open_create_with_clientid(name, 1, share_access, share_deny)
+}
+
+pub fn encode_open_create_with_clientid(
+    name: &str,
+    clientid: u64,
+    share_access: u32,
+    share_deny: u32,
+) -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_OPEN.encode(&mut buf);
     0u32.encode(&mut buf);
     share_access.encode(&mut buf);
     share_deny.encode(&mut buf);
-    1u64.encode(&mut buf);
+    clientid.encode(&mut buf);
     encode_opaque(&mut buf, b"test-open-owner");
     1u32.encode(&mut buf);
     0u32.encode(&mut buf);
@@ -659,9 +668,13 @@ pub fn encode_free_stateid(stateid: &Stateid4) -> Vec<u8> {
 }
 
 pub fn encode_open_confirm() -> Vec<u8> {
+    encode_open_confirm_stateid(&Stateid4::default())
+}
+
+pub fn encode_open_confirm_stateid(stateid: &Stateid4) -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_OPEN_CONFIRM.encode(&mut buf);
-    Stateid4::default().encode(&mut buf);
+    stateid.encode(&mut buf);
     0u32.encode(&mut buf);
     buf.to_vec()
 }

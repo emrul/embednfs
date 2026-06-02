@@ -6,8 +6,8 @@ use tokio::sync::Notify;
 
 use embednfs::{
     AccessMask, Attrs, CommitSupport, CreateRequest, CreateResult, DirPage, FileSystem, FsError,
-    FsResult, FsStats, HardLinks, MemFs, ReadResult, RequestContext, SetAttrs, Symlinks,
-    WriteResult, WriteStability, XattrSetMode, Xattrs,
+    FsResult, FsStats, HardLinks, MemFs, OpenLifecycle, ReadResult, RequestContext, SetAttrs,
+    Symlinks, WriteResult, WriteStability, XattrSetMode, Xattrs,
 };
 
 pub struct BlockingRemoveFs {
@@ -35,6 +35,19 @@ pub struct FailFirstRootStatFs {
 pub struct ForcedWriteStabilityFs {
     pub inner: MemFs,
     pub stability: WriteStability,
+}
+
+#[derive(Default)]
+pub struct OpenLifecycleCounts {
+    pub write_open_count: AtomicUsize,
+    pub non_write_open_count: AtomicUsize,
+    pub last_writer_close_count: AtomicUsize,
+    pub non_last_writer_close_count: AtomicUsize,
+}
+
+pub struct OpenLifecycleFs {
+    pub inner: MemFs,
+    pub counts: Arc<OpenLifecycleCounts>,
 }
 
 #[async_trait::async_trait]
@@ -658,5 +671,165 @@ impl FileSystem for ForcedWriteStabilityFs {
         attrs: &SetAttrs,
     ) -> FsResult<Attrs> {
         self.inner.setattr(ctx, handle, attrs).await
+    }
+}
+
+#[async_trait::async_trait]
+impl FileSystem for OpenLifecycleFs {
+    type Handle = u64;
+
+    fn root(&self) -> Self::Handle {
+        self.inner.root()
+    }
+    fn capabilities(&self) -> embednfs::FsCapabilities {
+        self.inner.capabilities()
+    }
+    fn limits(&self) -> embednfs::FsLimits {
+        self.inner.limits()
+    }
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
+        self.inner.statfs(ctx, handle).await
+    }
+    async fn getattr(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<Attrs> {
+        self.inner.getattr(ctx, handle).await
+    }
+    async fn access(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        requested: AccessMask,
+    ) -> FsResult<AccessMask> {
+        self.inner.access(ctx, handle, requested).await
+    }
+    async fn lookup(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+    ) -> FsResult<Self::Handle> {
+        self.inner.lookup(ctx, parent, name).await
+    }
+    async fn parent(
+        &self,
+        ctx: &RequestContext,
+        dir: &Self::Handle,
+    ) -> FsResult<Option<Self::Handle>> {
+        self.inner.parent(ctx, dir).await
+    }
+    async fn readdir(
+        &self,
+        ctx: &RequestContext,
+        dir: &Self::Handle,
+        cookie: u64,
+        max_entries: u32,
+        with_attrs: bool,
+    ) -> FsResult<DirPage<Self::Handle>> {
+        self.inner
+            .readdir(ctx, dir, cookie, max_entries, with_attrs)
+            .await
+    }
+    async fn read(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        offset: u64,
+        count: u32,
+    ) -> FsResult<ReadResult> {
+        self.inner.read(ctx, handle, offset, count).await
+    }
+    async fn write(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        offset: u64,
+        data: Bytes,
+        requested: WriteStability,
+    ) -> FsResult<WriteResult> {
+        self.inner.write(ctx, handle, offset, data, requested).await
+    }
+    async fn create(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+        req: CreateRequest,
+    ) -> FsResult<CreateResult<Self::Handle>> {
+        self.inner.create(ctx, parent, name, req).await
+    }
+    async fn remove(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+    ) -> FsResult<()> {
+        self.inner.remove(ctx, parent, name).await
+    }
+    async fn rename(
+        &self,
+        ctx: &RequestContext,
+        from_dir: &Self::Handle,
+        from_name: &str,
+        to_dir: &Self::Handle,
+        to_name: &str,
+    ) -> FsResult<()> {
+        self.inner
+            .rename(ctx, from_dir, from_name, to_dir, to_name)
+            .await
+    }
+    async fn setattr(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        attrs: &SetAttrs,
+    ) -> FsResult<Attrs> {
+        self.inner.setattr(ctx, handle, attrs).await
+    }
+    fn symlinks(&self) -> Option<&dyn Symlinks<Self::Handle>> {
+        self.inner.symlinks()
+    }
+    fn hard_links(&self) -> Option<&dyn HardLinks<Self::Handle>> {
+        self.inner.hard_links()
+    }
+    fn xattrs(&self) -> Option<&dyn Xattrs<Self::Handle>> {
+        self.inner.xattrs()
+    }
+    fn commit_support(&self) -> Option<&dyn CommitSupport<Self::Handle>> {
+        self.inner.commit_support()
+    }
+    fn open_lifecycle(&self) -> Option<&dyn OpenLifecycle<Self::Handle>> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenLifecycle<u64> for OpenLifecycleFs {
+    async fn on_open(
+        &self,
+        _ctx: &RequestContext,
+        _handle: &u64,
+        write_access: bool,
+    ) -> FsResult<()> {
+        let counter = if write_access {
+            &self.counts.write_open_count
+        } else {
+            &self.counts.non_write_open_count
+        };
+        let _ = counter.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn on_close(
+        &self,
+        _ctx: &RequestContext,
+        _handle: &u64,
+        last_writer: bool,
+    ) -> FsResult<()> {
+        let counter = if last_writer {
+            &self.counts.last_writer_close_count
+        } else {
+            &self.counts.non_last_writer_close_count
+        };
+        let _ = counter.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
