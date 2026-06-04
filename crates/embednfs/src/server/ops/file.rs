@@ -342,6 +342,18 @@ impl<F: FileSystem> NfsServer<F> {
                     }
                     Err(FsError::NotFound) => match &args.openhow {
                         Openflag4::Create(how) => {
+                            // Creating a named attribute writes the parent's
+                            // xattr namespace; gate it on XATTR_WRITE so an
+                            // OPEN+CREATE is fail-closed just like SETXATTR
+                            // (RFC 8276 §5.3), before any mutation happens.
+                            match self
+                                .access_for(request_ctx, *parent, AccessMask::XATTR_WRITE)
+                                .await
+                            {
+                                Ok(granted) if granted.contains(AccessMask::XATTR_WRITE) => {}
+                                Ok(_) => return NfsResop4::Open(NfsStat4::Access, None),
+                                Err(e) => return NfsResop4::Open(e.to_nfsstat4(), None),
+                            }
                             let before_change = match &before_attr {
                                 Ok(attr) => attr.change_id,
                                 Err(e) => return NfsResop4::Open(e.to_nfsstat4(), None),
@@ -434,22 +446,48 @@ impl<F: FileSystem> NfsServer<F> {
 
         // Fail-closed OPEN: an OPEN against an object that already exists must
         // carry the permission its share_access implies, so that ACCESS, OPEN,
-        // and the later READ/WRITE data path all agree. A file the server just
-        // created is exempt — successful creation grants the returned stateid
-        // regardless of the new file's mode (POSIX open-after-create). Synthetic
-        // named-attribute objects police their own access on the xattr path, so
-        // only real filesystem objects are checked here.
-        if !created && let ServerObject::Fs(id) = &object {
+        // and the later READ/WRITE data path all agree — those data-path ops
+        // trust the OPEN gate and do not re-check FileSystem::access themselves.
+        // A file the server just created is exempt: successful creation grants
+        // the returned stateid regardless of the new file's mode (POSIX
+        // open-after-create), and the named-attribute create branch above
+        // already required XATTR_WRITE before writing.
+        //
+        // A regular file maps share_access to data-access bits; a named-attribute
+        // file maps it to the parent's XATTR_READ/XATTR_WRITE bits, mirroring the
+        // RFC 8276 GETXATTR/SETXATTR ops so the macOS OPENATTR path is gated the
+        // same way as the Linux xattr ops.
+        if !created {
             let share_access = self.state.share_access_mode(args.share_access);
-            let mut need = AccessMask::NONE;
-            if share_access & OPEN4_SHARE_ACCESS_READ != 0 {
-                need |= AccessMask::READ;
-            }
-            if share_access & OPEN4_SHARE_ACCESS_WRITE != 0 {
-                need |= AccessMask::MODIFY | AccessMask::EXTEND;
-            }
-            if need != AccessMask::NONE {
-                match self.access_for(request_ctx, *id, need).await {
+            let read = share_access & OPEN4_SHARE_ACCESS_READ != 0;
+            let write = share_access & OPEN4_SHARE_ACCESS_WRITE != 0;
+            let check = match &object {
+                ServerObject::Fs(id) => {
+                    let mut need = AccessMask::NONE;
+                    if read {
+                        need |= AccessMask::READ;
+                    }
+                    if write {
+                        need |= AccessMask::MODIFY | AccessMask::EXTEND;
+                    }
+                    Some((*id, need))
+                }
+                ServerObject::NamedAttrFile { parent, .. } => {
+                    let mut need = AccessMask::NONE;
+                    if read {
+                        need |= AccessMask::XATTR_READ;
+                    }
+                    if write {
+                        need |= AccessMask::XATTR_WRITE;
+                    }
+                    Some((*parent, need))
+                }
+                ServerObject::NamedAttrDir(_) => None,
+            };
+            if let Some((id, need)) = check
+                && need != AccessMask::NONE
+            {
+                match self.access_for(request_ctx, id, need).await {
                     Ok(granted) if granted.contains(need) => {}
                     Ok(_) => return NfsResop4::Open(NfsStat4::Access, None),
                     Err(e) => return NfsResop4::Open(e.to_nfsstat4(), None),

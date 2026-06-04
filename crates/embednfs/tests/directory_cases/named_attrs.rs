@@ -579,6 +579,154 @@ async fn test_named_attr_remove_missing_returns_noent() {
     assert_eq!(op_status, NfsStat4::Noent as u32);
 }
 
+// ===== Named-attribute OPEN authorization (fail-closed OPEN) =====
+
+/// Builds a single-file `MemFs` with the given parent mode and optional xattr.
+async fn file_with_mode_xattr(name: &str, mode: u32, xattr: Option<(&str, &[u8])>) -> MemFs {
+    let fs = MemFs::new();
+    let ctx = RequestContext::anonymous();
+    let id = fs
+        .create(
+            &ctx,
+            &1,
+            name,
+            CreateRequest {
+                kind: CreateKind::File,
+                attrs: SetAttrs {
+                    mode: Some(mode),
+                    ..SetAttrs::default()
+                },
+            },
+        )
+        .await
+        .unwrap()
+        .handle;
+    if let Some((key, value)) = xattr {
+        fs.set_xattr(
+            &ctx,
+            &id,
+            key,
+            Bytes::copy_from_slice(value),
+            XattrSetMode::CreateOnly,
+        )
+        .await
+        .unwrap();
+    }
+    fs
+}
+
+/// Drives `SEQUENCE → PUTROOTFH → LOOKUP(notes.txt) → OPENATTR → <open_op>` and
+/// returns the OPEN op status (or OPENATTR's status if that step itself fails).
+async fn named_attr_open_status(fs: AccessPolicyFs, create_dir: bool, open_op: &[u8]) -> u32 {
+    let port = start_server_with_fs(fs).await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let lookup_op = encode_lookup("notes.txt");
+    let openattr_op = encode_openattr(create_dir);
+    let compound = encode_compound(
+        "named-attr-authz",
+        &[&seq_op, &rootfh_op, &lookup_op, &openattr_op, open_op],
+    );
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+
+    let (_status, _, _) = parse_compound_header(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let (opnum, _) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTROOTFH);
+    let (opnum, _) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_LOOKUP);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_OPENATTR);
+    if op_status != NfsStat4::Ok as u32 {
+        return op_status;
+    }
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_OPEN);
+    op_status
+}
+
+/// A write OPEN of an existing named attribute whose parent denies XATTR_WRITE
+/// (`0444`) returns `NFS4ERR_ACCESS` — the macOS OPENATTR path is gated like
+/// the RFC 8276 SETXATTR op.
+/// Origin: fail-closed OPEN extended to synthetic named-attribute files.
+/// RFC: RFC 8881 §5.3, §18.16.3; RFC 8276 §5.3 (XATTR_WRITE).
+#[tokio::test]
+async fn test_named_attr_write_open_denied_when_parent_readonly() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let open_op = encode_open_nocreate_with_access(
+        "user.demo",
+        OPEN4_SHARE_ACCESS_WRITE,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// A read OPEN of an existing named attribute whose parent denies XATTR_READ
+/// (`0000`) returns `NFS4ERR_ACCESS`.
+/// Origin: fail-closed OPEN extended to synthetic named-attribute files.
+/// RFC: RFC 8881 §5.3, §18.16.3; RFC 8276 §5.2 (XATTR_READ).
+#[tokio::test]
+async fn test_named_attr_read_open_denied_when_parent_unreadable() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o000, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let open_op = encode_open_nocreate_with_access(
+        "user.demo",
+        OPEN4_SHARE_ACCESS_READ,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// OPEN+CREATE of a named attribute is denied before any mutation when the
+/// parent denies XATTR_WRITE (`0444`).
+/// Origin: fail-closed OPEN — creating an xattr requires XATTR_WRITE.
+/// RFC: RFC 8881 §5.3, §18.16.3; RFC 8276 §5.3 (XATTR_WRITE).
+#[tokio::test]
+async fn test_named_attr_create_open_denied_when_parent_readonly() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, None).await,
+        AccessPolicy::OwnerMode,
+    );
+    let open_op = encode_open_create("user.new");
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// OPEN+CREATE of a named attribute succeeds when the parent grants XATTR_WRITE
+/// (`0644`) — the gate does not reject opens the backend would permit.
+/// Origin: fail-closed OPEN must not over-restrict the named-attribute path.
+/// RFC: RFC 8881 §5.3, §18.16.3.
+#[tokio::test]
+async fn test_named_attr_create_open_allowed_when_parent_writable() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o644, None).await,
+        AccessPolicy::OwnerMode,
+    );
+    let open_op = encode_open_create("user.new");
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Ok as u32
+    );
+}
+
 /// GETATTR on a file caches its named-attribute summary.
 /// Origin: implementation-specific cache behavior.
 /// RFC: RFC 8881 §5.3, §18.7.3.
