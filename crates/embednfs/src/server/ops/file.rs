@@ -107,6 +107,48 @@ impl<F: FileSystem> NfsServer<F> {
         Ok(())
     }
 
+    /// Validates an OPEN's `share_access`/`share_deny` before any backend access.
+    ///
+    /// The access mode (low two bits) must be exactly READ, WRITE, or BOTH — a
+    /// zero or malformed mode would otherwise slip past the fail-closed gate,
+    /// which derives its required permission from those bits, and leave later
+    /// READ/WRITE unchecked. `share_deny` must be NONE/READ/WRITE/BOTH. Any other
+    /// bits are rejected, except the recognized want-delegation hints, which are
+    /// only legal from minor version 1 onward (RFC 8881 §18.16.3, §10.4.1).
+    fn validate_open_share(
+        share_access: u32,
+        share_deny: u32,
+        minorversion: u32,
+    ) -> Result<(), NfsStat4> {
+        if share_access & OPEN4_SHARE_ACCESS_BOTH == 0 {
+            return Err(NfsStat4::Inval);
+        }
+        if share_deny & !OPEN4_SHARE_DENY_BOTH != 0 {
+            return Err(NfsStat4::Inval);
+        }
+        let extra = share_access & !OPEN4_SHARE_ACCESS_BOTH;
+        if extra == 0 {
+            return Ok(());
+        }
+        if minorversion == 0 {
+            return Err(NfsStat4::Inval);
+        }
+        let signal_flags = OPEN4_SHARE_ACCESS_WANT_SIGNAL_DELEG_WHEN_RESRC_AVAIL
+            | OPEN4_SHARE_ACCESS_WANT_PUSH_DELEG_WHEN_UNCONTENDED;
+        if extra & !(OPEN4_SHARE_ACCESS_WANT_DELEG_MASK | signal_flags) != 0 {
+            return Err(NfsStat4::Inval);
+        }
+        match extra & OPEN4_SHARE_ACCESS_WANT_DELEG_MASK {
+            OPEN4_SHARE_ACCESS_WANT_NO_PREFERENCE
+            | OPEN4_SHARE_ACCESS_WANT_READ_DELEG
+            | OPEN4_SHARE_ACCESS_WANT_WRITE_DELEG
+            | OPEN4_SHARE_ACCESS_WANT_ANY_DELEG
+            | OPEN4_SHARE_ACCESS_WANT_NO_DELEG
+            | OPEN4_SHARE_ACCESS_WANT_CANCEL => Ok(()),
+            _ => Err(NfsStat4::Inval),
+        }
+    }
+
     fn requested_write_stability(stable: u32) -> Result<WriteStability, NfsStat4> {
         match stable {
             UNSTABLE4 => Ok(WriteStability::Unstable),
@@ -244,6 +286,16 @@ impl<F: FileSystem> NfsServer<F> {
         minorversion: u32,
         sequence_clientid: Option<Clientid4>,
     ) -> NfsResop4 {
+        // Reject a malformed share before touching any state or backend: a zero
+        // or invalid access mode would otherwise pass the fail-closed gate with
+        // an empty required-permission set and create a stateid that later
+        // READ/WRITE would honor unchecked.
+        if let Err(status) =
+            Self::validate_open_share(args.share_access, args.share_deny, minorversion)
+        {
+            return NfsResop4::Open(status, None);
+        }
+
         let (_, container) = match self.resolve_object(current_fh).await {
             Ok(resolved) => resolved,
             Err(status) => return NfsResop4::Open(status, None),

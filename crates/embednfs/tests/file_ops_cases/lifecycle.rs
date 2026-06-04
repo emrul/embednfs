@@ -244,6 +244,104 @@ async fn test_open_write_on_readonly_export_denied() {
     assert_eq!(open_status(port, &open_op).await, NfsStat4::Access as u32);
 }
 
+// ===== OPEN share_access / share_deny validation =====
+
+/// OPEN with `share_access == 0` is rejected with `NFS4ERR_INVAL`. A zero access
+/// mode would otherwise pass the fail-closed gate with an empty required-
+/// permission set and yield a stateid that later READ/WRITE would honor.
+/// Origin: RFC 8881 share_access well-formedness; guards the OPEN gate.
+/// RFC: RFC 8881 §18.16.3.
+#[tokio::test]
+async fn test_open_zero_share_access_returns_inval() {
+    let port = start_server().await;
+    let open_op = encode_open_nocreate_with_access("anything.txt", 0, OPEN4_SHARE_DENY_NONE);
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Inval as u32);
+}
+
+/// OPEN with a `share_deny` outside NONE/READ/WRITE/BOTH is rejected.
+/// Origin: RFC 8881 share_deny well-formedness.
+/// RFC: RFC 8881 §18.16.3.
+#[tokio::test]
+async fn test_open_invalid_share_deny_returns_inval() {
+    let port = start_server().await;
+    let open_op = encode_open_nocreate_with_access("anything.txt", OPEN4_SHARE_ACCESS_READ, 0x4);
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Inval as u32);
+}
+
+/// OPEN whose `share_access` carries bits outside the access mode and the
+/// recognized want-delegation hints is rejected.
+/// Origin: RFC 8881 share_access well-formedness.
+/// RFC: RFC 8881 §18.16.3.
+#[tokio::test]
+async fn test_open_unknown_share_access_bits_return_inval() {
+    let port = start_server().await;
+    let open_op = encode_open_nocreate_with_access(
+        "anything.txt",
+        OPEN4_SHARE_ACCESS_READ | 0x10,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Inval as u32);
+}
+
+/// A v4.1 OPEN may carry want-delegation hints alongside the access mode; they
+/// are accepted (the server simply grants no delegation).
+/// Origin: positive control — want bits must not be over-rejected on v4.1.
+/// RFC: RFC 8881 §18.16.3, §10.4.1.
+#[tokio::test]
+async fn test_open_v41_want_delegation_bits_accepted() {
+    let fs = populated_fs(&["existing.txt"]).await;
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_nocreate_with_access(
+        "existing.txt",
+        OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Ok as u32);
+}
+
+/// A v4.0 OPEN must not carry want-delegation bits — sessions/delegation wants
+/// do not exist at minor version 0, so such a share_access is `NFS4ERR_INVAL`.
+/// Origin: RFC 7530 has no want-delegation bits in share_access.
+/// RFC: RFC 7530 §16.16; RFC 8881 §18.16.3.
+#[tokio::test]
+async fn test_open_v40_want_delegation_bits_return_inval() {
+    let port = start_server().await;
+    let mut stream = connect(port).await;
+
+    let setclientid_op = encode_setclientid(&[4, 0, 0, 0, 0, 0, 0, 9], b"v40-share-validation");
+    let compound = encode_compound_minor("v40-setclientid", 0, &[&setclientid_op]);
+    let mut resp = send_rpc(&mut stream, 1, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let _ = parse_op_header(&mut resp);
+    let (clientid, confirm_verifier) = parse_setclientid_res(&mut resp);
+
+    let confirm_op = encode_setclientid_confirm(clientid, &confirm_verifier);
+    let compound = encode_compound_minor("v40-confirm", 0, &[&confirm_op]);
+    let mut resp = send_rpc(&mut stream, 2, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+
+    let putrootfh_op = encode_putrootfh();
+    let open_op = encode_open_create_with_clientid(
+        "x.txt",
+        clientid,
+        OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    let compound = encode_compound_minor("v40-open", 0, &[&putrootfh_op, &open_op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (_status, _, _) = parse_compound_header(&mut resp);
+    let (opnum, _) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTROOTFH);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_OPEN);
+    assert_eq!(op_status, NfsStat4::Inval as u32);
+}
+
 /// CLOSE on a valid open stateid succeeds.
 /// Origin: `pynfs/nfs4.0/servertests/st_close.py` (CODE `CLOSE1`).
 /// RFC: RFC 8881 §18.2.3.
