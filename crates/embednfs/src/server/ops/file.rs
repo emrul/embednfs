@@ -616,9 +616,31 @@ impl<F: FileSystem> NfsServer<F> {
                 cinfo,
                 rflags,
                 attrset: Bitmap4::new(),
-                delegation: OpenDelegation4::None,
+                delegation: Self::open_no_delegation(args.share_access),
             }),
         )
+    }
+
+    /// Builds the `delegation` field for a successful OPEN that grants none.
+    ///
+    /// The server never hands out file delegations. A v4.0 client (which has no
+    /// want bits) and a v4.1 client that expressed no delegation preference get
+    /// the plain `OPEN_DELEGATE_NONE`. A v4.1 client that asked via the want bits
+    /// must instead be told *why* none was granted, via `OPEN_DELEGATE_NONE_EXT`
+    /// (RFC 8881 §18.16.3): `WND4_NOT_WANTED` when it asked for none, otherwise
+    /// `WND4_NOT_SUPP_FTYPE` since this server supports no delegations.
+    fn open_no_delegation(share_access: u32) -> OpenDelegation4 {
+        if share_access & !OPEN4_SHARE_ACCESS_BOTH == 0 {
+            return OpenDelegation4::None;
+        }
+        let why = if share_access & OPEN4_SHARE_ACCESS_WANT_DELEG_MASK
+            == OPEN4_SHARE_ACCESS_WANT_NO_DELEG
+        {
+            WhyNoDelegation4::NotWanted
+        } else {
+            WhyNoDelegation4::NotSuppFtype
+        };
+        OpenDelegation4::NoneExt(OpenNoneDelegation4::Other(why))
     }
 
     pub(crate) async fn op_read(

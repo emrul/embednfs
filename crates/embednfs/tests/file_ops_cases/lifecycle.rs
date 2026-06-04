@@ -283,12 +283,52 @@ async fn test_open_unknown_share_access_bits_return_inval() {
     assert_eq!(open_status(port, &open_op).await, NfsStat4::Inval as u32);
 }
 
-/// A v4.1 OPEN may carry want-delegation hints alongside the access mode; they
-/// are accepted (the server simply grants no delegation).
-/// Origin: positive control — want bits must not be over-rejected on v4.1.
+/// Drives `SEQUENCE → PUTROOTFH → <open_op>`, asserts the OPEN succeeds, and
+/// returns its delegation type plus any `why_no_delegation4` reason.
+async fn open_delegation(port: u16, open_op: &[u8]) -> (u32, Option<u32>) {
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let compound = encode_compound("open-deleg", &[&seq_op, &rootfh_op, open_op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+
+    let (_status, _, _) = parse_compound_header(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let (opnum, _) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTROOTFH);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_OPEN);
+    assert_eq!(op_status, NfsStat4::Ok as u32);
+    parse_open_res_delegation(&mut resp)
+}
+
+/// A plain OPEN with no want bits returns `OPEN_DELEGATE_NONE` (no reason).
+/// Origin: response-shape control for the no-delegation path.
+/// RFC: RFC 8881 §18.16.3.
+#[tokio::test]
+async fn test_open_without_want_bits_returns_plain_none() {
+    let fs = populated_fs(&["existing.txt"]).await;
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_nocreate_with_access(
+        "existing.txt",
+        OPEN4_SHARE_ACCESS_READ,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    let (deleg_type, why) = open_delegation(port, &open_op).await;
+    assert_eq!(deleg_type, OpenDelegationType4::None as u32);
+    assert_eq!(why, None);
+}
+
+/// A v4.1 OPEN that asks for a delegation it cannot get is accepted, but the
+/// reply must use `OPEN_DELEGATE_NONE_EXT` and say why — this server supports no
+/// delegations, so `WND4_NOT_SUPP_FTYPE`.
+/// Origin: response-shape requirement for want-delegation OPENs.
 /// RFC: RFC 8881 §18.16.3, §10.4.1.
 #[tokio::test]
-async fn test_open_v41_want_delegation_bits_accepted() {
+async fn test_open_v41_want_read_deleg_returns_none_ext_not_supp() {
     let fs = populated_fs(&["existing.txt"]).await;
     let port = start_server_with_fs(fs).await;
     let open_op = encode_open_nocreate_with_access(
@@ -296,7 +336,27 @@ async fn test_open_v41_want_delegation_bits_accepted() {
         OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG,
         OPEN4_SHARE_DENY_NONE,
     );
-    assert_eq!(open_status(port, &open_op).await, NfsStat4::Ok as u32);
+    let (deleg_type, why) = open_delegation(port, &open_op).await;
+    assert_eq!(deleg_type, OpenDelegationType4::NoneExt as u32);
+    assert_eq!(why, Some(WhyNoDelegation4::NotSuppFtype as u32));
+}
+
+/// A v4.1 OPEN that asks for no delegation (`WANT_NO_DELEG`) gets
+/// `OPEN_DELEGATE_NONE_EXT` with `WND4_NOT_WANTED`.
+/// Origin: response-shape requirement for want-delegation OPENs.
+/// RFC: RFC 8881 §18.16.3, §10.4.1.
+#[tokio::test]
+async fn test_open_v41_want_no_deleg_returns_none_ext_not_wanted() {
+    let fs = populated_fs(&["existing.txt"]).await;
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_nocreate_with_access(
+        "existing.txt",
+        OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    let (deleg_type, why) = open_delegation(port, &open_op).await;
+    assert_eq!(deleg_type, OpenDelegationType4::NoneExt as u32);
+    assert_eq!(why, Some(WhyNoDelegation4::NotWanted as u32));
 }
 
 /// A v4.0 OPEN must not carry want-delegation bits — sessions/delegation wants

@@ -102,6 +102,30 @@ pub fn skip_open_res(resp: &mut Bytes) -> Stateid4 {
     stateid
 }
 
+/// Parses an OPEN result and returns its delegation type plus, for an
+/// `OPEN_DELEGATE_NONE_EXT` reply, the `why_no_delegation4` reason code.
+pub fn parse_open_res_delegation(resp: &mut Bytes) -> (u32, Option<u32>) {
+    let _ = parse_stateid(resp);
+    skip_change_info(resp);
+    let _ = u32::decode(resp).unwrap(); // rflags
+    skip_bitmap(resp);
+    let deleg_type = u32::decode(resp).unwrap();
+    let why = if deleg_type == OpenDelegationType4::NoneExt as u32 {
+        let why = u32::decode(resp).unwrap();
+        // The Contention and Resource reasons carry a trailing bool; the
+        // generic `Other` reason does not.
+        if why == WhyNoDelegation4::Contention as u32
+            || why == WhyNoDelegation4::ResourceNotAvail as u32
+        {
+            let _ = bool::decode(resp).unwrap();
+        }
+        Some(why)
+    } else {
+        None
+    };
+    (deleg_type, why)
+}
+
 pub fn parse_open_res(resp: &mut Bytes) -> (Stateid4, (bool, u64, u64)) {
     let stateid = parse_stateid(resp);
     let cinfo = parse_change_info(resp);
