@@ -4,6 +4,7 @@
 //! so that individual test modules stay focused on test logic.
 #![allow(dead_code, unused_imports, unreachable_pub)]
 
+mod access_fs;
 mod attr_bits;
 mod encode;
 mod external_server;
@@ -16,6 +17,7 @@ mod session;
 mod transport;
 mod wrappers;
 
+pub use access_fs::*;
 pub use attr_bits::*;
 pub use encode::*;
 pub use external_server::*;

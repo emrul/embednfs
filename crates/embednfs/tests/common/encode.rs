@@ -355,6 +355,28 @@ pub fn encode_open_create_with_clientid(
     buf.to_vec()
 }
 
+pub fn encode_open_create_with_mode(name: &str, share_access: u32, mode: u32) -> Vec<u8> {
+    let mut attrmask = Bitmap4::new();
+    attrmask.set(FATTR4_MODE);
+    let mut vals = BytesMut::new();
+    mode.encode(&mut vals);
+
+    let mut buf = BytesMut::new();
+    OP_OPEN.encode(&mut buf);
+    0u32.encode(&mut buf);
+    share_access.encode(&mut buf);
+    OPEN4_SHARE_DENY_NONE.encode(&mut buf);
+    1u64.encode(&mut buf);
+    encode_opaque(&mut buf, b"test-open-owner");
+    1u32.encode(&mut buf);
+    0u32.encode(&mut buf);
+    attrmask.encode(&mut buf);
+    encode_opaque(&mut buf, &vals);
+    0u32.encode(&mut buf);
+    name.to_string().encode(&mut buf);
+    buf.to_vec()
+}
+
 pub fn encode_open_nocreate_with_owner(name: &str, owner: &[u8]) -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_OPEN.encode(&mut buf);

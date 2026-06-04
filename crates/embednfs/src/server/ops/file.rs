@@ -4,7 +4,9 @@ use tracing::warn;
 use embednfs_proto::*;
 
 use crate::attrs;
-use crate::fs::{FileSystem, FsError, ObjectType, RequestContext, WriteResult, WriteStability};
+use crate::fs::{
+    AccessMask, FileSystem, FsError, ObjectType, RequestContext, WriteResult, WriteStability,
+};
 use crate::internal::{ServerFileType, ServerObject};
 use crate::session::{CurrentStateidMode, ResolvedStateid};
 
@@ -428,6 +430,31 @@ impl<F: FileSystem> NfsServer<F> {
 
         if !created && let Err(e) = &before_attr {
             return NfsResop4::Open(e.to_nfsstat4(), None);
+        }
+
+        // Fail-closed OPEN: an OPEN against an object that already exists must
+        // carry the permission its share_access implies, so that ACCESS, OPEN,
+        // and the later READ/WRITE data path all agree. A file the server just
+        // created is exempt — successful creation grants the returned stateid
+        // regardless of the new file's mode (POSIX open-after-create). Synthetic
+        // named-attribute objects police their own access on the xattr path, so
+        // only real filesystem objects are checked here.
+        if !created && let ServerObject::Fs(id) = &object {
+            let share_access = self.state.share_access_mode(args.share_access);
+            let mut need = AccessMask::NONE;
+            if share_access & OPEN4_SHARE_ACCESS_READ != 0 {
+                need |= AccessMask::READ;
+            }
+            if share_access & OPEN4_SHARE_ACCESS_WRITE != 0 {
+                need |= AccessMask::MODIFY | AccessMask::EXTEND;
+            }
+            if need != AccessMask::NONE {
+                match self.access_for(request_ctx, *id, need).await {
+                    Ok(granted) if granted.contains(need) => {}
+                    Ok(_) => return NfsResop4::Open(NfsStat4::Access, None),
+                    Err(e) => return NfsResop4::Open(e.to_nfsstat4(), None),
+                }
+            }
         }
 
         let stateid = match self

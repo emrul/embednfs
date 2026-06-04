@@ -110,6 +110,140 @@ async fn test_open_owner_too_long_returns_badxdr() {
     assert_eq!(num_results, 0);
 }
 
+// ===== OPEN authorization (fail-closed OPEN) =====
+
+/// Creates a single-file `MemFs` whose file carries the given POSIX mode.
+async fn memfs_with_mode(name: &str, mode: u32) -> MemFs {
+    let fs = MemFs::new();
+    let ctx = RequestContext::anonymous();
+    let _ = fs
+        .create(
+            &ctx,
+            &1,
+            name,
+            CreateRequest {
+                kind: CreateKind::File,
+                attrs: SetAttrs {
+                    mode: Some(mode),
+                    ..SetAttrs::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+    fs
+}
+
+/// Drives `SEQUENCE → PUTROOTFH → <open_op>` and returns the OPEN op status.
+async fn open_status(port: u16, open_op: &[u8]) -> u32 {
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let compound = encode_compound("open-authz", &[&seq_op, &rootfh_op, open_op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+
+    let (_status, _, _) = parse_compound_header(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let (opnum, _) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTROOTFH);
+    let (opnum, op_status) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_OPEN);
+    op_status
+}
+
+/// A write OPEN of an existing read-only (`0444`) file returns `NFS4ERR_ACCESS`.
+/// Origin: fail-closed OPEN — OPEN must honor the permission its share_access implies.
+/// RFC: RFC 8881 §18.16.3 (NFS4ERR_ACCESS), §6.2.1.3.1 (ACE4_WRITE_DATA).
+#[tokio::test]
+async fn test_open_write_on_readonly_file_denied() {
+    let fs = AccessPolicyFs::new(
+        memfs_with_mode("ro.txt", 0o444).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let open_op =
+        encode_open_nocreate_with_access("ro.txt", OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_NONE);
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Access as u32);
+}
+
+/// A read OPEN of an existing unreadable (`0000`) file returns `NFS4ERR_ACCESS`.
+/// Origin: fail-closed OPEN — OPEN must honor the permission its share_access implies.
+/// RFC: RFC 8881 §18.16.3 (NFS4ERR_ACCESS), §6.2.1.3.1 (ACE4_READ_DATA).
+#[tokio::test]
+async fn test_open_read_on_unreadable_file_denied() {
+    let fs = AccessPolicyFs::new(
+        memfs_with_mode("noperm.txt", 0o000).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_nocreate_with_access(
+        "noperm.txt",
+        OPEN4_SHARE_ACCESS_READ,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Access as u32);
+}
+
+/// A write OPEN of an existing writable (`0644`) file still succeeds.
+/// Origin: fail-closed OPEN must not reject opens the backend would permit.
+/// RFC: RFC 8881 §18.16.3.
+#[tokio::test]
+async fn test_open_write_on_writable_file_allowed() {
+    let fs = AccessPolicyFs::new(
+        memfs_with_mode("rw.txt", 0o644).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let open_op =
+        encode_open_nocreate_with_access("rw.txt", OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_NONE);
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Ok as u32);
+}
+
+/// OPEN+CREATE of a new file succeeds even when its create mode is restrictive.
+/// Origin: fail-closed OPEN exempts freshly created files (POSIX open-after-create).
+/// RFC: RFC 8881 §18.16.3.
+#[tokio::test]
+async fn test_open_create_restrictive_mode_allowed() {
+    let fs = AccessPolicyFs::new(MemFs::new(), AccessPolicy::OwnerMode);
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_create_with_mode("fresh.txt", OPEN4_SHARE_ACCESS_BOTH, 0o444);
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Ok as u32);
+}
+
+/// OPEN+CREATE against an existing read-only file is authorized as a plain OPEN.
+/// Origin: fail-closed OPEN — an OPEN4_CREATE that finds an existing file must
+/// still pass the target-file access check.
+/// RFC: RFC 8881 §18.16.3 (NFS4ERR_ACCESS).
+#[tokio::test]
+async fn test_open_create_existing_readonly_file_denied() {
+    let fs = AccessPolicyFs::new(
+        memfs_with_mode("exists.txt", 0o444).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    // encode_open_create requests OPEN4_SHARE_ACCESS_BOTH (write included).
+    let open_op = encode_open_create("exists.txt");
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Access as u32);
+}
+
+/// A write OPEN against a read-only export is denied via `FileSystem::access`.
+/// Origin: fail-closed OPEN — a read-only backend tree rejects write opens.
+/// RFC: RFC 8881 §18.16.3 (NFS4ERR_ACCESS).
+#[tokio::test]
+async fn test_open_write_on_readonly_export_denied() {
+    let fs = AccessPolicyFs::new(populated_fs(&["file.txt"]).await, AccessPolicy::ReadOnly);
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_nocreate_with_access(
+        "file.txt",
+        OPEN4_SHARE_ACCESS_WRITE,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    assert_eq!(open_status(port, &open_op).await, NfsStat4::Access as u32);
+}
+
 /// CLOSE on a valid open stateid succeeds.
 /// Origin: `pynfs/nfs4.0/servertests/st_close.py` (CODE `CLOSE1`).
 /// RFC: RFC 8881 §18.2.3.
