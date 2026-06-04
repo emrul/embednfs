@@ -600,6 +600,17 @@ impl<F: FileSystem> NfsServer<F> {
             return NfsResop4::Read(status, None);
         }
 
+        // A named-attribute READ reaches the backend xattr value whether the
+        // file was OPENed or only LOOKed up with an anonymous stateid, so gate
+        // it here on the parent's XATTR_READ right rather than at OPEN alone.
+        if let ServerObject::NamedAttrFile { parent, .. } = &object
+            && let Err(status) = self
+                .require_access(request_ctx, *parent, AccessMask::XATTR_READ)
+                .await
+        {
+            return NfsResop4::Read(status, None);
+        }
+
         let result = match object {
             ServerObject::Fs(id) => {
                 // RFC 8881 §18.22.3: READ on a directory must return NFS4ERR_ISDIR.
@@ -681,6 +692,17 @@ impl<F: FileSystem> NfsServer<F> {
                 },
             )
             .await
+        {
+            return NfsResop4::Write(status, None);
+        }
+
+        // A named-attribute WRITE mutates the backend xattr value regardless of
+        // how the stateid was obtained, so gate it on the parent's XATTR_WRITE
+        // right rather than at OPEN alone.
+        if let ServerObject::NamedAttrFile { parent, .. } = &object
+            && let Err(status) = self
+                .require_access(request_ctx, *parent, AccessMask::XATTR_WRITE)
+                .await
         {
             return NfsResop4::Write(status, None);
         }

@@ -727,6 +727,239 @@ async fn test_named_attr_create_open_allowed_when_parent_writable() {
     );
 }
 
+// ===== Named-attribute namespace authorization (LOOKUP/READDIR/READ/REMOVE) =====
+
+/// Runs `SEQUENCE → PUTROOTFH → LOOKUP(notes.txt) → OPENATTR → <tail>` where the
+/// final tail op is expected to be the authorization decision, and returns that
+/// last op's status. Every op the server executes before it is bodyless, so the
+/// compound short-circuits on the first denial.
+async fn named_attr_tail_status(fs: AccessPolicyFs, tail: &[&[u8]]) -> u32 {
+    let port = start_server_with_fs(fs).await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let lookup_file = encode_lookup("notes.txt");
+    let openattr_op = encode_openattr(false);
+    let mut ops: Vec<&[u8]> = vec![&seq_op, &rootfh_op, &lookup_file, &openattr_op];
+    ops.extend_from_slice(tail);
+    let compound = encode_compound("named-attr-namespace", &ops);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+
+    let (_status, _, num_results) = parse_compound_header(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let mut last = NfsStat4::Ok as u32;
+    for _ in 1..num_results {
+        let (_opnum, op_status) = parse_op_header(&mut resp);
+        last = op_status;
+    }
+    last
+}
+
+/// LOOKUP within the attribute directory is denied when the parent withholds
+/// XATTR_LIST (`0000`), so a name probe cannot leak past the backend.
+/// Origin: central XATTR_LIST gate for the synthetic attribute directory.
+/// RFC: RFC 8881 §5.3, §18.31.3; RFC 8276 §5.2.
+#[tokio::test]
+async fn test_named_attr_lookup_denied_without_xattr_list() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o000, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let lookup_xattr = encode_lookup("user.demo");
+    assert_eq!(
+        named_attr_tail_status(fs, &[&lookup_xattr]).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// READDIR of the attribute directory is denied when the parent withholds
+/// XATTR_LIST (`0000`).
+/// Origin: central XATTR_LIST gate for the synthetic attribute directory.
+/// RFC: RFC 8881 §5.3, §18.23.3; RFC 8276 §5.2.
+#[tokio::test]
+async fn test_named_attr_readdir_denied_without_xattr_list() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o000, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let readdir_op = encode_readdir_custom(0, [0u8; 8], 4096, 8192, &[FATTR4_TYPE]);
+    assert_eq!(
+        named_attr_tail_status(fs, &[&readdir_op]).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// READ of an attribute value is denied when the parent grants XATTR_LIST but
+/// not XATTR_READ — proving the READ gate is independent of the LOOKUP gate,
+/// closing the LOOKUP+anonymous-READ side channel that OPEN alone did not cover.
+/// Origin: central XATTR_READ gate on the named-attribute data path.
+/// RFC: RFC 8881 §5.3, §18.22.3; RFC 8276 §5.2.
+#[tokio::test]
+async fn test_named_attr_read_denied_when_parent_grants_list_only() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o644, Some(("user.demo", b"value"))).await,
+        AccessPolicy::XattrListOnly,
+    );
+    let lookup_xattr = encode_lookup("user.demo");
+    let read_op = encode_read(0, 1024);
+    assert_eq!(
+        named_attr_tail_status(fs, &[&lookup_xattr, &read_op]).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// REMOVE of a named attribute is denied when the parent withholds XATTR_WRITE
+/// (`0444`), while LISTing it is still permitted.
+/// Origin: central XATTR_WRITE gate for attribute removal.
+/// RFC: RFC 8881 §5.3, §18.25.3; RFC 8276 §5.3.
+#[tokio::test]
+async fn test_named_attr_remove_denied_without_xattr_write() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let remove_op = encode_remove("user.demo");
+    assert_eq!(
+        named_attr_tail_status(fs, &[&remove_op]).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// READDIR of the attribute directory succeeds when the parent grants XATTR_LIST
+/// (`0444`) — the central gate does not over-restrict permitted listing.
+/// Origin: positive control for the XATTR_LIST gate.
+/// RFC: RFC 8881 §5.3, §18.23.3.
+#[tokio::test]
+async fn test_named_attr_readdir_allowed_with_xattr_list() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let readdir_op = encode_readdir_custom(0, [0u8; 8], 4096, 8192, &[FATTR4_FILEID, FATTR4_TYPE]);
+    assert_eq!(
+        named_attr_tail_status(fs, &[&readdir_op]).await,
+        NfsStat4::Ok as u32
+    );
+}
+
+/// ACCESS on a named-attribute file derives its bits from the parent's xattr
+/// rights: a read-only parent (`0444`) grants READ but not MODIFY/EXTEND/DELETE,
+/// and never advertises LOOKUP, EXECUTE, or the XATTR_* bits.
+/// Origin: ACCESS reporting consistency for synthetic attribute files.
+/// RFC: RFC 8881 §5.3, §18.1.3; RFC 8276 §5.2, §5.3.
+#[tokio::test]
+async fn test_access_on_named_attr_file_reflects_parent_xattr_rights() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+
+    let request = ACCESS4_READ
+        | ACCESS4_LOOKUP
+        | ACCESS4_MODIFY
+        | ACCESS4_EXTEND
+        | ACCESS4_DELETE
+        | ACCESS4_EXECUTE
+        | ACCESS4_XAREAD
+        | ACCESS4_XAWRITE
+        | ACCESS4_XALIST;
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let lookup_file = encode_lookup("notes.txt");
+    let openattr_op = encode_openattr(false);
+    let lookup_xattr = encode_lookup("user.demo");
+    let access_op = encode_access(request);
+    let compound = encode_compound(
+        "access-named-attr-file",
+        &[
+            &seq_op,
+            &rootfh_op,
+            &lookup_file,
+            &openattr_op,
+            &lookup_xattr,
+            &access_op,
+        ],
+    );
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let (supported, access) = access_after_prefix(&mut resp);
+    assert_eq!(
+        supported,
+        ACCESS4_READ | ACCESS4_MODIFY | ACCESS4_EXTEND | ACCESS4_DELETE
+    );
+    assert_eq!(access, ACCESS4_READ);
+}
+
+/// ACCESS on a named-attribute directory derives its bits from the parent's
+/// xattr rights: a read-only parent (`0444`) grants READ|LOOKUP (from
+/// XATTR_LIST) but not the mutating bits, and never advertises EXECUTE or
+/// XATTR_*.
+/// Origin: ACCESS reporting consistency for the synthetic attribute directory.
+/// RFC: RFC 8881 §5.3, §18.1.3; RFC 8276 §5.2, §5.3.
+#[tokio::test]
+async fn test_access_on_named_attr_dir_reflects_parent_xattr_rights() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+
+    let request = ACCESS4_READ
+        | ACCESS4_LOOKUP
+        | ACCESS4_MODIFY
+        | ACCESS4_EXTEND
+        | ACCESS4_DELETE
+        | ACCESS4_EXECUTE
+        | ACCESS4_XAREAD
+        | ACCESS4_XAWRITE
+        | ACCESS4_XALIST;
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let lookup_file = encode_lookup("notes.txt");
+    let openattr_op = encode_openattr(false);
+    let access_op = encode_access(request);
+    let compound = encode_compound(
+        "access-named-attr-dir",
+        &[&seq_op, &rootfh_op, &lookup_file, &openattr_op, &access_op],
+    );
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+    let (status, _, _) = parse_compound_header(&mut resp);
+    assert_eq!(status, NfsStat4::Ok as u32);
+    let (supported, access) = access_after_prefix(&mut resp);
+    assert_eq!(
+        supported,
+        ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY | ACCESS4_EXTEND | ACCESS4_DELETE
+    );
+    assert_eq!(access, ACCESS4_READ | ACCESS4_LOOKUP);
+}
+
+/// Walks bodyless op headers (SEQUENCE excepted) until the ACCESS result and
+/// returns its `(supported, access)` pair.
+fn access_after_prefix(resp: &mut Bytes) -> (u32, u32) {
+    let _ = parse_op_header(resp);
+    skip_sequence_res(resp);
+    loop {
+        let (opnum, op_status) = parse_op_header(resp);
+        if opnum == OP_ACCESS {
+            assert_eq!(op_status, NfsStat4::Ok as u32);
+            return parse_access_res(resp);
+        }
+        assert_eq!(op_status, NfsStat4::Ok as u32);
+    }
+}
+
 /// GETATTR on a file caches its named-attribute summary.
 /// Origin: implementation-specific cache behavior.
 /// RFC: RFC 8881 §5.3, §18.7.3.

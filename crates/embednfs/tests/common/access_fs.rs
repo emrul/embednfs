@@ -21,6 +21,11 @@ pub enum AccessPolicy {
     OwnerMode,
     /// Deny all write-related access regardless of mode (a read-only export).
     ReadOnly,
+    /// Grant only XATTR_LIST — a backend that allows listing the named-attribute
+    /// directory but neither reading attribute values nor writing them. Used to
+    /// prove the per-op XATTR_READ/XATTR_WRITE gates are independent of the
+    /// XATTR_LIST traversal gate (POSIX mode bits cannot separate the two).
+    XattrListOnly,
 }
 
 /// A `MemFs` wrapper that enforces `policy` from its `access` implementation.
@@ -89,6 +94,7 @@ impl FileSystem for AccessPolicyFs {
                 owner_mode_access(self.inner.getattr(ctx, handle).await?.mode)
             }
             AccessPolicy::ReadOnly => read_only_access(),
+            AccessPolicy::XattrListOnly => AccessMask::XATTR_LIST,
         };
         Ok(granted & requested)
     }

@@ -1,7 +1,7 @@
 use embednfs_proto::*;
 
 use crate::attrs;
-use crate::fs::{FileSystem, RequestContext};
+use crate::fs::{AccessMask, FileSystem, RequestContext};
 use crate::internal::{ServerFileType, ServerObject};
 
 use super::super::NfsServer;
@@ -21,13 +21,20 @@ impl<F: FileSystem> NfsServer<F> {
 
         match self.build_attr(request_ctx, &object).await {
             Ok(attr) => {
+                let is_synthetic = matches!(
+                    object,
+                    ServerObject::NamedAttrFile { .. } | ServerObject::NamedAttrDir(_)
+                );
                 let mut server_supported = ACCESS4_READ
                     | ACCESS4_LOOKUP
                     | ACCESS4_MODIFY
                     | ACCESS4_EXTEND
                     | ACCESS4_DELETE
                     | ACCESS4_EXECUTE;
-                if self.capabilities().xattrs {
+                // The synthetic namespace has no nested named attributes and no
+                // executable/lookupable entries, so it never advertises the
+                // XATTR_* bits, EXECUTE, or (for an attribute file) LOOKUP.
+                if self.capabilities().xattrs && !is_synthetic {
                     server_supported |= ACCESS4_XAREAD | ACCESS4_XAWRITE | ACCESS4_XALIST;
                 }
                 if matches!(
@@ -36,6 +43,9 @@ impl<F: FileSystem> NfsServer<F> {
                 ) {
                     server_supported &= !ACCESS4_EXECUTE;
                 }
+                if matches!(object, ServerObject::NamedAttrFile { .. }) {
+                    server_supported &= !(ACCESS4_EXECUTE | ACCESS4_LOOKUP);
+                }
                 let requested = Self::nfs_access_mask(args.access & server_supported);
                 let granted = match object {
                     ServerObject::Fs(id) => match self.access_for(request_ctx, id, requested).await
@@ -43,7 +53,38 @@ impl<F: FileSystem> NfsServer<F> {
                         Ok(mask) => mask,
                         Err(e) => return NfsResop4::Access(e.to_nfsstat4(), 0, 0),
                     },
-                    _ => requested,
+                    // A named-attribute file's access derives from the parent's
+                    // xattr read/write rights: READ<-XATTR_READ, and the
+                    // mutating bits (MODIFY/EXTEND/DELETE)<-XATTR_WRITE.
+                    ServerObject::NamedAttrFile { parent, .. } => {
+                        match self
+                            .access_for(
+                                request_ctx,
+                                parent,
+                                AccessMask::XATTR_READ | AccessMask::XATTR_WRITE,
+                            )
+                            .await
+                        {
+                            Ok(parent_grant) => Self::named_attr_file_access(parent_grant),
+                            Err(e) => return NfsResop4::Access(e.to_nfsstat4(), 0, 0),
+                        }
+                    }
+                    // The attribute directory derives from the parent's list and
+                    // write rights: READ/LOOKUP<-XATTR_LIST, and the mutating
+                    // bits (MODIFY/EXTEND/DELETE)<-XATTR_WRITE.
+                    ServerObject::NamedAttrDir(parent) => {
+                        match self
+                            .access_for(
+                                request_ctx,
+                                parent,
+                                AccessMask::XATTR_LIST | AccessMask::XATTR_WRITE,
+                            )
+                            .await
+                        {
+                            Ok(parent_grant) => Self::named_attr_dir_access(parent_grant),
+                            Err(e) => return NfsResop4::Access(e.to_nfsstat4(), 0, 0),
+                        }
+                    }
                 };
                 let supported = args.access & server_supported;
                 NfsResop4::Access(
@@ -54,6 +95,32 @@ impl<F: FileSystem> NfsServer<F> {
             }
             Err(e) => NfsResop4::Access(e.to_nfsstat4(), 0, 0),
         }
+    }
+
+    /// Maps a parent's granted xattr rights onto the file-level ACCESS bits the
+    /// server reports for a synthetic named-attribute file.
+    fn named_attr_file_access(parent_grant: AccessMask) -> AccessMask {
+        let mut granted = AccessMask::NONE;
+        if parent_grant.contains(AccessMask::XATTR_READ) {
+            granted |= AccessMask::READ;
+        }
+        if parent_grant.contains(AccessMask::XATTR_WRITE) {
+            granted |= AccessMask::MODIFY | AccessMask::EXTEND | AccessMask::DELETE;
+        }
+        granted
+    }
+
+    /// Maps a parent's granted xattr rights onto the file-level ACCESS bits the
+    /// server reports for a synthetic named-attribute directory.
+    fn named_attr_dir_access(parent_grant: AccessMask) -> AccessMask {
+        let mut granted = AccessMask::NONE;
+        if parent_grant.contains(AccessMask::XATTR_LIST) {
+            granted |= AccessMask::READ | AccessMask::LOOKUP;
+        }
+        if parent_grant.contains(AccessMask::XATTR_WRITE) {
+            granted |= AccessMask::MODIFY | AccessMask::EXTEND | AccessMask::DELETE;
+        }
+        granted
     }
 
     pub(crate) async fn op_getattr(
@@ -164,10 +231,18 @@ impl<F: FileSystem> NfsServer<F> {
                 Err(e) => e.to_nfsstat4(),
             },
             ServerObject::NamedAttrFile { parent, name } => {
-                if let Some(size) = set_attrs.size
-                    && let Err(e) = self.xattr_resize(request_ctx, parent, &name, size).await
-                {
-                    return NfsResop4::Setattr(e.to_nfsstat4(), Bitmap4::new());
+                if let Some(size) = set_attrs.size {
+                    // Resizing a named attribute mutates its backend value;
+                    // gate it on the parent's XATTR_WRITE right before the write.
+                    if let Err(status) = self
+                        .require_access(request_ctx, parent, AccessMask::XATTR_WRITE)
+                        .await
+                    {
+                        return NfsResop4::Setattr(status, Bitmap4::new());
+                    }
+                    if let Err(e) = self.xattr_resize(request_ctx, parent, &name, size).await {
+                        return NfsResop4::Setattr(e.to_nfsstat4(), Bitmap4::new());
+                    }
                 }
                 self.state
                     .apply_setattr(&object, ServerFileType::NamedAttr, &set_attrs)

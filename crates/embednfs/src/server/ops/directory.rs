@@ -3,7 +3,7 @@ use tracing::{trace, warn};
 use embednfs_proto::*;
 
 use crate::attrs;
-use crate::fs::{FileSystem, FsError, ObjectType, RequestContext};
+use crate::fs::{AccessMask, FileSystem, FsError, ObjectType, RequestContext};
 use crate::internal::{ServerFileType, ServerObject};
 
 use super::super::{
@@ -201,6 +201,15 @@ impl<F: FileSystem> NfsServer<F> {
                     Some(named) => named,
                     None => return NfsResop4::Lookup(NfsStat4::Notsupp),
                 };
+                // Traversing the synthetic attribute directory requires the
+                // parent's XATTR_LIST right (RFC 8276 §5.2), gated centrally so
+                // a name probe cannot leak existence past the backend.
+                if let Err(status) = self
+                    .require_access(request_ctx, parent, AccessMask::XATTR_LIST)
+                    .await
+                {
+                    return NfsResop4::Lookup(status);
+                }
                 let parent_handle = match self.resolve_backend_handle(parent).await {
                     Ok(handle) => handle,
                     Err(e) => return NfsResop4::Lookup(e.to_nfsstat4()),
@@ -373,6 +382,14 @@ impl<F: FileSystem> NfsServer<F> {
                     Some(named) => named,
                     None => return NfsResop4::Readdir(NfsStat4::Notsupp, None),
                 };
+                // Listing the synthetic attribute directory requires the
+                // parent's XATTR_LIST right (RFC 8276 §5.2), gated centrally.
+                if let Err(status) = self
+                    .require_access(request_ctx, parent, AccessMask::XATTR_LIST)
+                    .await
+                {
+                    return NfsResop4::Readdir(status, None);
+                }
                 let parent_handle = match self.resolve_backend_handle(parent).await {
                     Ok(handle) => handle,
                     Err(e) => return NfsResop4::Readdir(e.to_nfsstat4(), None),
@@ -537,6 +554,15 @@ impl<F: FileSystem> NfsServer<F> {
                     Some(named) => named,
                     None => return NfsResop4::Remove(NfsStat4::Notsupp, None),
                 };
+                // Removing a named attribute mutates the parent's xattr
+                // namespace and requires its XATTR_WRITE right (RFC 8276 §5.3),
+                // gated centrally before the backend mutation.
+                if let Err(status) = self
+                    .require_access(request_ctx, parent, AccessMask::XATTR_WRITE)
+                    .await
+                {
+                    return NfsResop4::Remove(status, None);
+                }
                 let parent_handle = match self.resolve_backend_handle(parent).await {
                     Ok(handle) => handle,
                     Err(e) => return NfsResop4::Remove(e.to_nfsstat4(), None),

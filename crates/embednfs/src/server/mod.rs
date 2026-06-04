@@ -346,6 +346,25 @@ impl<F: FileSystem> NfsServer<F> {
         self.fs.access(ctx, &handle, requested).await
     }
 
+    /// Central authorization gate: requires every bit in `need` to be granted on
+    /// `id`, mapping a shortfall to `NFS4ERR_ACCESS` and backend errors through
+    /// `to_nfsstat4`. The synthetic named-attribute namespace routes its
+    /// LOOKUP/READDIR/READ/WRITE/REMOVE through here against the parent object's
+    /// xattr permissions, so those ops agree with ACCESS and the RFC 8276 xattr
+    /// ops rather than trusting each backend `Xattrs` method to self-police.
+    async fn require_access(
+        &self,
+        ctx: &RequestContext,
+        id: ObjectId,
+        need: AccessMask,
+    ) -> Result<(), NfsStat4> {
+        match self.access_for(ctx, id, need).await {
+            Ok(granted) if granted.contains(need) => Ok(()),
+            Ok(_) => Err(NfsStat4::Access),
+            Err(e) => Err(e.to_nfsstat4()),
+        }
+    }
+
     async fn lookup(
         &self,
         ctx: &RequestContext,
