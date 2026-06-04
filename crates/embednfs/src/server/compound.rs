@@ -301,10 +301,7 @@ impl<F: FileSystem> NfsServer<F> {
                     NfsResop4::Savefh(NfsStat4::Nofilehandle)
                 }
             }
-            NfsArgop4::Secinfo(_) => NfsResop4::Secinfo(
-                NfsStat4::Ok,
-                vec![SecinfoEntry4 { flavor: 1 }, SecinfoEntry4 { flavor: 0 }],
-            ),
+            NfsArgop4::Secinfo(_) => NfsResop4::Secinfo(NfsStat4::Ok, self.secinfo_flavors()),
             NfsArgop4::Setattr(args) => {
                 self.op_setattr(
                     request_ctx,

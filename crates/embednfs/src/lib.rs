@@ -12,6 +12,7 @@ pub(crate) mod memfs;
 pub(crate) mod server;
 pub(crate) mod session;
 
+pub use embednfs_proto::AuthFlavor;
 pub use fs::{
     AccessMask, Attrs, AuthContext, CommitSupport, CreateKind, CreateRequest, CreateResult,
     DirEntry, DirPage, FileSystem, FsCapabilities, FsError, FsId, FsLimits, FsResult, FsStats,
@@ -21,5 +22,6 @@ pub use fs::{
 pub use identity::NfsServerIdentity;
 pub use memfs::MemFs;
 pub use server::{
-    DelegationConfig, IdMapper, NfsServer, NfsServerBuilder, NfsServerControl, NumericIdMapper,
+    AuthPolicy, DelegationConfig, IdMapper, NfsServer, NfsServerBuilder, NfsServerControl,
+    NumericIdMapper,
 };

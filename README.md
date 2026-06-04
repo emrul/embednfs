@@ -109,6 +109,30 @@ address, so restarts of the same daemon keep the same identity while independent
 ports/exports differ. Override it with `EMBEDNFS_SERVER_OWNER_MAJOR_ID`,
 `EMBEDNFS_SERVER_OWNER_MINOR_ID`, and `EMBEDNFS_SERVER_SCOPE`.
 
+## Authentication Flavors
+
+By default the server accepts and advertises AUTH_SYS and AUTH_NONE. Restrict
+the accepted RPC authentication flavors with an `AuthPolicy`; a request whose
+credential flavor is not allowed is rejected at the RPC layer with
+`AUTH_TOOWEAK`, before any filesystem call, and `SECINFO` / `SECINFO_NO_NAME`
+advertise exactly the configured flavors:
+
+```rust
+use embednfs::{AuthPolicy, NfsServer};
+
+// Require AUTH_SYS on every request; reject AUTH_NONE at the protocol boundary.
+let server = NfsServer::builder(fs)
+    .auth_policy(AuthPolicy::sys_only())
+    .build();
+```
+
+`AuthPolicy::new([AuthFlavor::Sys, AuthFlavor::None])` sets an explicit list (the
+order is the `SECINFO` preference order). Only AUTH_SYS and AUTH_NONE are
+meaningfully authenticated; a malformed AUTH_SYS credential still fails with
+`AUTH_BADCRED`. The `RequestContext` passed to the filesystem still distinguishes
+`AuthContext::Sys` from `AuthContext::None`, so a backend can additionally treat
+a missing AUTH_SYS identity as unprivileged.
+
 ## Filesystem API
 
 The filesystem API is handle-based and models the exported filesystem rather than the raw backing store. Weak backends such as exFAT- or S3-style adapters are expected to provide stable handles, exported attrs, and any overlay metadata they need behind the trait.

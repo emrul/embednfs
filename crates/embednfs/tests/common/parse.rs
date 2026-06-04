@@ -303,3 +303,10 @@ pub fn skip_secinfo_entries(resp: &mut Bytes) -> u32 {
     }
     count
 }
+
+/// Parses a SECINFO / SECINFO_NO_NAME result body into its list of flavor
+/// numbers, in wire order.
+pub fn parse_secinfo_entries(resp: &mut Bytes) -> Vec<u32> {
+    let count = u32::decode(resp).unwrap();
+    (0..count).map(|_| u32::decode(resp).unwrap()).collect()
+}

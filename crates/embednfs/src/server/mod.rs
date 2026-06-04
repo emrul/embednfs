@@ -56,12 +56,66 @@ impl IdMapper for NumericIdMapper {
     }
 }
 
+/// Which RPC authentication flavors the server accepts and advertises.
+///
+/// A request whose credential flavor is not in this set is rejected at the RPC
+/// layer with `AUTH_TOOWEAK`, before any filesystem/backend call runs, and the
+/// same set is what `SECINFO` and `SECINFO_NO_NAME` report. The default accepts
+/// AUTH_SYS and AUTH_NONE, matching the historical behavior.
+///
+/// Only AUTH_SYS and AUTH_NONE are meaningfully authenticated by this server.
+/// Other flavors may be listed, in which case they are advertised and accepted
+/// at the RPC layer but resolve to [`AuthContext::Unknown`]; the filesystem
+/// implementation is then responsible for how it treats them.
+#[derive(Debug, Clone)]
+pub struct AuthPolicy {
+    flavors: Vec<AuthFlavor>,
+}
+
+impl AuthPolicy {
+    /// Accepts and advertises exactly `flavors`, preserving their order for the
+    /// `SECINFO` reply (most-preferred first).
+    pub fn new(flavors: impl IntoIterator<Item = AuthFlavor>) -> Self {
+        Self {
+            flavors: flavors.into_iter().collect(),
+        }
+    }
+
+    /// Accepts only AUTH_SYS — a request must carry AUTH_SYS credentials, and
+    /// AUTH_NONE (or anything else) is rejected with `AUTH_TOOWEAK`.
+    pub fn sys_only() -> Self {
+        Self::new([AuthFlavor::Sys])
+    }
+
+    /// Accepts AUTH_SYS and AUTH_NONE — the default, backward-compatible policy.
+    pub fn sys_and_none() -> Self {
+        Self::new([AuthFlavor::Sys, AuthFlavor::None])
+    }
+
+    /// The accepted flavors in `SECINFO` order (most-preferred first).
+    pub fn flavors(&self) -> &[AuthFlavor] {
+        &self.flavors
+    }
+
+    /// Returns whether a raw RPC auth-flavor number is accepted.
+    pub fn allows(&self, flavor: u32) -> bool {
+        self.flavors.iter().any(|f| *f as u32 == flavor)
+    }
+}
+
+impl Default for AuthPolicy {
+    fn default() -> Self {
+        Self::sys_and_none()
+    }
+}
+
 /// Builder for [`NfsServer`].
 pub struct NfsServerBuilder<F: FileSystem> {
     fs: F,
     id_mapper: Arc<dyn IdMapper>,
     delegation_config: DelegationConfig,
     server_identity: NfsServerIdentity,
+    auth_policy: AuthPolicy,
 }
 
 impl<F: FileSystem> NfsServerBuilder<F> {
@@ -104,6 +158,20 @@ impl<F: FileSystem> NfsServerBuilder<F> {
         self
     }
 
+    /// Replaces the accepted/advertised RPC authentication flavors.
+    ///
+    /// Example: restrict the server to AUTH_SYS only.
+    /// ```no_run
+    /// # use embednfs::{AuthPolicy, MemFs, NfsServer};
+    /// let server = NfsServer::builder(MemFs::new())
+    ///     .auth_policy(AuthPolicy::sys_only())
+    ///     .build();
+    /// ```
+    pub fn auth_policy(mut self, policy: AuthPolicy) -> Self {
+        self.auth_policy = policy;
+        self
+    }
+
     /// Builds the server instance.
     pub fn build(self) -> NfsServer<F> {
         NfsServer {
@@ -114,6 +182,7 @@ impl<F: FileSystem> NfsServerBuilder<F> {
             next_object_id: AtomicU64::new(1),
             id_mapper: self.id_mapper,
             delegation_config: self.delegation_config,
+            auth_policy: self.auth_policy,
             backchannels: Arc::new(backchannel::BackchannelManager::default()),
         }
     }
@@ -152,6 +221,7 @@ pub struct NfsServer<F: FileSystem> {
     next_object_id: AtomicU64,
     id_mapper: Arc<dyn IdMapper>,
     delegation_config: DelegationConfig,
+    auth_policy: AuthPolicy,
     backchannels: Arc<backchannel::BackchannelManager>,
 }
 
@@ -193,6 +263,7 @@ impl<F: FileSystem> NfsServer<F> {
             id_mapper: Arc::new(NumericIdMapper),
             delegation_config: DelegationConfig::default(),
             server_identity: NfsServerIdentity::default(),
+            auth_policy: AuthPolicy::default(),
         }
     }
 
@@ -267,7 +338,15 @@ impl<F: FileSystem> NfsServer<F> {
         if body.is_empty() { Some(params) } else { None }
     }
 
-    fn validate_rpc_auth(call: &RpcCallHeader) -> Result<(), AuthStat> {
+    fn validate_rpc_auth(&self, call: &RpcCallHeader) -> Result<(), AuthStat> {
+        // Reject a disallowed credential flavor before any further work — this is
+        // the protocol-boundary enforcement of the auth policy. The verifier
+        // flavor is not policy-checked: an AUTH_SYS call carries an AUTH_NONE
+        // verifier, which must still be accepted under a sys-only policy.
+        if !self.auth_policy.allows(call.cred.flavor) {
+            return Err(AuthStat::TooWeak);
+        }
+
         if call.cred.flavor == AuthFlavor::Sys as u32
             && Self::parse_auth_sys(&call.cred.body).is_none()
         {
@@ -281,6 +360,17 @@ impl<F: FileSystem> NfsServer<F> {
         }
 
         Ok(())
+    }
+
+    /// The `SECINFO`/`SECINFO_NO_NAME` flavor list derived from the auth policy.
+    pub(crate) fn secinfo_flavors(&self) -> Vec<SecinfoEntry4> {
+        self.auth_policy
+            .flavors()
+            .iter()
+            .map(|flavor| SecinfoEntry4 {
+                flavor: *flavor as u32,
+            })
+            .collect()
     }
 
     fn request_context(cred: &OpaqueAuth) -> RequestContext {

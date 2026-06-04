@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicUsize;
 use crate::common::*;
 
 mod attrs_state;
+mod auth_policy;
 mod lifecycle;
 mod secinfo_verify;
 mod xattrs;

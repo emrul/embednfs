@@ -300,10 +300,7 @@ impl<F: FileSystem> NfsServer<F> {
         match style_status {
             Ok(()) => {
                 *current_fh = None;
-                NfsResop4::SecInfoNoName(
-                    NfsStat4::Ok,
-                    vec![SecinfoEntry4 { flavor: 1 }, SecinfoEntry4 { flavor: 0 }],
-                )
+                NfsResop4::SecInfoNoName(NfsStat4::Ok, self.secinfo_flavors())
             }
             Err(status) => NfsResop4::SecInfoNoName(status, vec![]),
         }

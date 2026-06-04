@@ -2,10 +2,15 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 
-use embednfs::{DelegationConfig, FileSystem, MemFs, NfsServer, NfsServerIdentity};
+use embednfs::{AuthPolicy, DelegationConfig, FileSystem, MemFs, NfsServer, NfsServerIdentity};
 
 pub async fn start_server() -> u16 {
     start_server_with_fs(MemFs::new()).await
+}
+
+pub async fn start_server_with_auth_policy(policy: AuthPolicy) -> u16 {
+    let server = NfsServer::builder(MemFs::new()).auth_policy(policy).build();
+    start_server_instance(server).await
 }
 
 pub async fn start_server_with_fs<F: FileSystem>(fs: F) -> u16 {

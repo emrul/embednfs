@@ -308,6 +308,13 @@ pub fn encode_secinfo_no_name(style: u32) -> Vec<u8> {
     buf.to_vec()
 }
 
+pub fn encode_secinfo(name: &str) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    OP_SECINFO.encode(&mut buf);
+    name.to_string().encode(&mut buf);
+    buf.to_vec()
+}
+
 pub fn encode_open_create(name: &str) -> Vec<u8> {
     encode_open_create_with_access(name, OPEN4_SHARE_ACCESS_BOTH, OPEN4_SHARE_DENY_NONE)
 }
