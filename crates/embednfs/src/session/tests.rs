@@ -530,6 +530,37 @@ async fn test_expired_client_conflicts_are_reaped_for_other_clients() {
 }
 
 #[tokio::test]
+async fn test_create_open_state_rejects_malformed_share() {
+    let state = StateManager::new();
+    let object = ServerObject::Fs(1);
+
+    // A zero access mode must be rejected — an open with no access mode could
+    // not be authorized against any later READ/WRITE.
+    assert!(matches!(
+        state
+            .create_open_state(object.clone(), 1, 0, OPEN4_SHARE_DENY_NONE)
+            .await,
+        Err(NfsStat4::Inval)
+    ));
+
+    // An out-of-range share_deny must be rejected.
+    assert!(matches!(
+        state
+            .create_open_state(object.clone(), 1, OPEN4_SHARE_ACCESS_READ, 0x4)
+            .await,
+        Err(NfsStat4::Inval)
+    ));
+
+    // A well-formed share still succeeds.
+    assert!(
+        state
+            .create_open_state(object, 1, OPEN4_SHARE_ACCESS_BOTH, OPEN4_SHARE_DENY_NONE)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn test_prepare_sequence_returns_expired_all_state_revoked_for_revoked_session() {
     let (state, clock) = state_with_lease(Duration::from_secs(1));
     let client = state

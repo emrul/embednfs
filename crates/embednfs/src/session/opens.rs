@@ -45,6 +45,15 @@ impl StateManager {
     ) -> Result<Stateid4, NfsStat4> {
         self.reap_expired_clients().await;
         let share_access = self.share_access_mode(share_access);
+        // Defense in depth: `op_open` fully validates the share before reaching
+        // here, but this is the only place an open is registered. Reject a
+        // malformed mode so a future caller cannot install an open that no
+        // READ/WRITE could be authorized against (zero access mode) or that
+        // would corrupt share-conflict checks (out-of-range deny). Want/signal
+        // hints above the access mode are left to the protocol layer.
+        if share_access & OPEN4_SHARE_ACCESS_BOTH == 0 || share_deny & !OPEN4_SHARE_DENY_BOTH != 0 {
+            return Err(NfsStat4::Inval);
+        }
         let mut inner = self.inner.write().await;
         for state in inner.open_files.values() {
             if !state.active {
