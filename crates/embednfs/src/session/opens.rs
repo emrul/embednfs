@@ -44,14 +44,18 @@ impl StateManager {
         share_deny: u32,
     ) -> Result<Stateid4, NfsStat4> {
         self.reap_expired_clients().await;
-        let share_access = self.share_access_mode(share_access);
+        // Store only the access mode. Want/signal hints (the 0xFF00 selector and
+        // the signal flags above it) are a protocol-layer concern that `op_open`
+        // has already validated; keeping them out of `OpenFileState` ensures the
+        // stored share can never carry non-mode bits that would skew the
+        // share/lock conflict checks below.
+        let share_access = share_access & OPEN4_SHARE_ACCESS_BOTH;
         // Defense in depth: `op_open` fully validates the share before reaching
         // here, but this is the only place an open is registered. Reject a
         // malformed mode so a future caller cannot install an open that no
         // READ/WRITE could be authorized against (zero access mode) or that
-        // would corrupt share-conflict checks (out-of-range deny). Want/signal
-        // hints above the access mode are left to the protocol layer.
-        if share_access & OPEN4_SHARE_ACCESS_BOTH == 0 || share_deny & !OPEN4_SHARE_DENY_BOTH != 0 {
+        // would corrupt share-conflict checks (out-of-range deny).
+        if share_access == 0 || share_deny & !OPEN4_SHARE_DENY_BOTH != 0 {
             return Err(NfsStat4::Inval);
         }
         let mut inner = self.inner.write().await;

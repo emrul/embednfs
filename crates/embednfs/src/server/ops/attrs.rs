@@ -172,16 +172,24 @@ impl<F: FileSystem> NfsServer<F> {
             Err(status) => return NfsResop4::Setattr(status, Bitmap4::new()),
         };
 
-        // A named-attribute resize mutates the backend value; require the
-        // parent's XATTR_WRITE right before `build_attr` below reads it to size
-        // the truncation, so the backend is not touched ahead of the gate.
-        if set_attrs.size.is_some()
-            && let ServerObject::NamedAttrFile { parent, .. } = &object
-            && let Err(status) = self
-                .require_access(request_ctx, *parent, AccessMask::XATTR_WRITE)
-                .await
-        {
-            return NfsResop4::Setattr(status, Bitmap4::new());
+        // A SETATTR(size) is a truncate — a data mutation. Gate it on the
+        // backend access policy before `build_attr` below reads the object to
+        // size the change, so the backend is not touched ahead of the gate and a
+        // resize via a special stateid cannot bypass it. A regular file needs
+        // MODIFY|EXTEND; a named attribute needs the parent's XATTR_WRITE.
+        if set_attrs.size.is_some() {
+            let need = match &object {
+                ServerObject::Fs(id) => Some((*id, AccessMask::MODIFY | AccessMask::EXTEND)),
+                ServerObject::NamedAttrFile { parent, .. } => {
+                    Some((*parent, AccessMask::XATTR_WRITE))
+                }
+                ServerObject::NamedAttrDir(_) => None,
+            };
+            if let Some((id, mask)) = need
+                && let Err(status) = self.require_access(request_ctx, id, mask).await
+            {
+                return NfsResop4::Setattr(status, Bitmap4::new());
+            }
         }
 
         let current_attr = if set_attrs.size.is_some()

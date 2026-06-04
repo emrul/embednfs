@@ -98,17 +98,14 @@ pub fn skip_open_res(resp: &mut Bytes) -> Stateid4 {
     skip_change_info(resp);
     let _ = u32::decode(resp).unwrap();
     skip_bitmap(resp);
-    let _ = u32::decode(resp).unwrap();
+    let _ = read_open_delegation(resp);
     stateid
 }
 
-/// Parses an OPEN result and returns its delegation type plus, for an
-/// `OPEN_DELEGATE_NONE_EXT` reply, the `why_no_delegation4` reason code.
-pub fn parse_open_res_delegation(resp: &mut Bytes) -> (u32, Option<u32>) {
-    let _ = parse_stateid(resp);
-    skip_change_info(resp);
-    let _ = u32::decode(resp).unwrap(); // rflags
-    skip_bitmap(resp);
+/// Consumes an `open_delegation4` union and returns its type plus, for an
+/// `OPEN_DELEGATE_NONE_EXT` reply, the `why_no_delegation4` reason code. The
+/// full union is read so a following op in the same compound parses correctly.
+fn read_open_delegation(resp: &mut Bytes) -> (u32, Option<u32>) {
     let deleg_type = u32::decode(resp).unwrap();
     let why = if deleg_type == OpenDelegationType4::NoneExt as u32 {
         let why = u32::decode(resp).unwrap();
@@ -120,10 +117,52 @@ pub fn parse_open_res_delegation(resp: &mut Bytes) -> (u32, Option<u32>) {
             let _ = bool::decode(resp).unwrap();
         }
         Some(why)
+    } else if deleg_type == OpenDelegationType4::Read as u32 {
+        let _ = parse_stateid(resp);
+        let _ = bool::decode(resp).unwrap(); // recall
+        skip_nfsace4(resp);
+        None
+    } else if deleg_type == OpenDelegationType4::Write as u32 {
+        let _ = parse_stateid(resp);
+        let _ = bool::decode(resp).unwrap(); // recall
+        skip_nfs_space_limit4(resp);
+        skip_nfsace4(resp);
+        None
     } else {
         None
     };
     (deleg_type, why)
+}
+
+/// Skips an `nfsace4` (type, flag, mask, who).
+fn skip_nfsace4(resp: &mut Bytes) {
+    let _ = u32::decode(resp).unwrap(); // acetype
+    let _ = u32::decode(resp).unwrap(); // aceflag
+    let _ = u32::decode(resp).unwrap(); // acemask
+    let _ = decode_opaque(resp).unwrap(); // who
+}
+
+/// Skips an `nfs_space_limit4` union (by-blocks or by-size).
+fn skip_nfs_space_limit4(resp: &mut Bytes) {
+    let limitby = u32::decode(resp).unwrap();
+    if limitby == 1 {
+        // NFS_LIMIT_SIZE: filesize (u64)
+        let _ = u64::decode(resp).unwrap();
+    } else {
+        // NFS_LIMIT_BLOCKS: num_blocks (u32) + bytes_per_block (u32)
+        let _ = u32::decode(resp).unwrap();
+        let _ = u32::decode(resp).unwrap();
+    }
+}
+
+/// Parses an OPEN result and returns its delegation type plus, for an
+/// `OPEN_DELEGATE_NONE_EXT` reply, the `why_no_delegation4` reason code.
+pub fn parse_open_res_delegation(resp: &mut Bytes) -> (u32, Option<u32>) {
+    let _ = parse_stateid(resp);
+    skip_change_info(resp);
+    let _ = u32::decode(resp).unwrap(); // rflags
+    skip_bitmap(resp);
+    read_open_delegation(resp)
 }
 
 pub fn parse_open_res(resp: &mut Bytes) -> (Stateid4, (bool, u64, u64)) {

@@ -627,18 +627,17 @@ impl<F: FileSystem> NfsServer<F> {
     /// want bits) and a v4.1 client that expressed no delegation preference get
     /// the plain `OPEN_DELEGATE_NONE`. A v4.1 client that asked via the want bits
     /// must instead be told *why* none was granted, via `OPEN_DELEGATE_NONE_EXT`
-    /// (RFC 8881 §18.16.3): `WND4_NOT_WANTED` when it asked for none, otherwise
-    /// `WND4_NOT_SUPP_FTYPE` since this server supports no delegations.
+    /// (RFC 8881 §18.16.3): `WND4_NOT_WANTED` when it asked for none,
+    /// `WND4_CANCELED` for a want-cancel, otherwise `WND4_NOT_SUPP_FTYPE` since
+    /// this server supports no delegations.
     fn open_no_delegation(share_access: u32) -> OpenDelegation4 {
         if share_access & !OPEN4_SHARE_ACCESS_BOTH == 0 {
             return OpenDelegation4::None;
         }
-        let why = if share_access & OPEN4_SHARE_ACCESS_WANT_DELEG_MASK
-            == OPEN4_SHARE_ACCESS_WANT_NO_DELEG
-        {
-            WhyNoDelegation4::NotWanted
-        } else {
-            WhyNoDelegation4::NotSuppFtype
+        let why = match share_access & OPEN4_SHARE_ACCESS_WANT_DELEG_MASK {
+            OPEN4_SHARE_ACCESS_WANT_NO_DELEG => WhyNoDelegation4::NotWanted,
+            OPEN4_SHARE_ACCESS_WANT_CANCEL => WhyNoDelegation4::Cancelled,
+            _ => WhyNoDelegation4::NotSuppFtype,
         };
         OpenDelegation4::NoneExt(OpenNoneDelegation4::Other(why))
     }
@@ -693,6 +692,14 @@ impl<F: FileSystem> NfsServer<F> {
                     }
                     Err(e) => return NfsResop4::Read(e.to_nfsstat4(), None),
                     _ => {}
+                }
+                // Gate the data read on FileSystem::access. A READ via an
+                // anonymous/bypass special stateid never passed through OPEN, and
+                // this server does not bind a principal to stateids
+                // (no EXCHGID4_FLAG_BIND_PRINC_STATEID), so RFC 8881 requires the
+                // access check on the READ itself.
+                if let Err(status) = self.require_access(request_ctx, id, AccessMask::READ).await {
+                    return NfsResop4::Read(status, None);
                 }
                 self.read(request_ctx, id, args.offset, args.count).await
             }
@@ -799,6 +806,18 @@ impl<F: FileSystem> NfsServer<F> {
             ServerObject::NamedAttrFile { .. } => ServerFileType::NamedAttr,
             ServerObject::NamedAttrDir(_) => return NfsResop4::Write(NfsStat4::Isdir, None),
         };
+
+        // Gate the data write on FileSystem::access for the same reason as READ:
+        // a WRITE via an anonymous/bypass special stateid bypasses the OPEN gate,
+        // and stateids are not principal-bound, so the access check belongs on
+        // the WRITE itself (RFC 8881 §18.32.3).
+        if let ServerObject::Fs(id) = &object
+            && let Err(status) = self
+                .require_access(request_ctx, *id, AccessMask::MODIFY | AccessMask::EXTEND)
+                .await
+        {
+            return NfsResop4::Write(status, None);
+        }
 
         let result = match object.clone() {
             ServerObject::Fs(id) => {

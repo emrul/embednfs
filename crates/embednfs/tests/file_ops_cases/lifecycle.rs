@@ -359,6 +359,24 @@ async fn test_open_v41_want_no_deleg_returns_none_ext_not_wanted() {
     assert_eq!(why, Some(WhyNoDelegation4::NotWanted as u32));
 }
 
+/// A v4.1 OPEN with `WANT_CANCEL` gets `OPEN_DELEGATE_NONE_EXT` with
+/// `WND4_CANCELED`, not the generic not-supported reason.
+/// Origin: response-shape requirement for want-delegation OPENs.
+/// RFC: RFC 8881 §18.16.3, §10.4.1.
+#[tokio::test]
+async fn test_open_v41_want_cancel_returns_none_ext_cancelled() {
+    let fs = populated_fs(&["existing.txt"]).await;
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_nocreate_with_access(
+        "existing.txt",
+        OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_CANCEL,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    let (deleg_type, why) = open_delegation(port, &open_op).await;
+    assert_eq!(deleg_type, OpenDelegationType4::NoneExt as u32);
+    assert_eq!(why, Some(WhyNoDelegation4::Cancelled as u32));
+}
+
 /// A v4.0 OPEN must not carry want-delegation bits — sessions/delegation wants
 /// do not exist at minor version 0, so such a share_access is `NFS4ERR_INVAL`.
 /// Origin: RFC 7530 has no want-delegation bits in share_access.
@@ -400,6 +418,102 @@ async fn test_open_v40_want_delegation_bits_return_inval() {
     let (opnum, op_status) = parse_op_header(&mut resp);
     assert_eq!(opnum, OP_OPEN);
     assert_eq!(op_status, NfsStat4::Inval as u32);
+}
+
+// ===== Regular-file data path enforces FileSystem::access =====
+
+/// Drives `SEQUENCE → PUTROOTFH → LOOKUP(file) → <op>` (op using an
+/// anonymous/default stateid) and returns the final op's status.
+async fn anon_data_op_status(port: u16, file: &str, op: &[u8]) -> u32 {
+    let mut stream = connect(port).await;
+    let sessionid = setup_session(&mut stream).await;
+    let seq_op = encode_sequence(&sessionid, 1, 0);
+    let rootfh_op = encode_putrootfh();
+    let lookup_op = encode_lookup(file);
+    let compound = encode_compound("anon-data", &[&seq_op, &rootfh_op, &lookup_op, op]);
+    let mut resp = send_rpc(&mut stream, 3, 1, &compound).await;
+    parse_rpc_reply(&mut resp);
+
+    let (_status, _, _) = parse_compound_header(&mut resp);
+    let _ = parse_op_header(&mut resp);
+    skip_sequence_res(&mut resp);
+    let (opnum, _) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_PUTROOTFH);
+    let (opnum, _) = parse_op_header(&mut resp);
+    assert_eq!(opnum, OP_LOOKUP);
+    let (_opnum, op_status) = parse_op_header(&mut resp);
+    op_status
+}
+
+/// READ with the anonymous stateid (no OPEN) is denied when the backend denies
+/// read — the data path must enforce access, not just stateid validity.
+/// Origin: data-path access enforcement for special stateids.
+/// RFC: RFC 8881 §8.2.3, §18.22.3.
+#[tokio::test]
+async fn test_anonymous_read_denied_by_backend_access() {
+    let fs = AccessPolicyFs::new(
+        memfs_with_mode("secret.txt", 0o000).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let read_op = encode_read(0, 1024);
+    assert_eq!(
+        anon_data_op_status(port, "secret.txt", &read_op).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// WRITE with the anonymous stateid is denied when the backend denies write.
+/// Origin: data-path access enforcement for special stateids.
+/// RFC: RFC 8881 §8.2.3, §18.32.3.
+#[tokio::test]
+async fn test_anonymous_write_denied_by_backend_access() {
+    let fs = AccessPolicyFs::new(
+        memfs_with_mode("ro.txt", 0o444).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let write_op = encode_write(&Stateid4::default(), 0, b"intrusion");
+    assert_eq!(
+        anon_data_op_status(port, "ro.txt", &write_op).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// SETATTR(size) with the anonymous stateid is denied when the backend denies
+/// write — a truncate is a data mutation.
+/// Origin: data-path access enforcement for special stateids.
+/// RFC: RFC 8881 §8.2.3, §18.30.3.
+#[tokio::test]
+async fn test_anonymous_truncate_denied_by_backend_access() {
+    let fs = AccessPolicyFs::new(
+        memfs_with_mode("ro.txt", 0o444).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let setattr_op = encode_setattr_size(&Stateid4::default(), 0);
+    assert_eq!(
+        anon_data_op_status(port, "ro.txt", &setattr_op).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// READ with the anonymous stateid still succeeds when the backend permits it —
+/// the data-path gate does not over-restrict.
+/// Origin: positive control for data-path access enforcement.
+/// RFC: RFC 8881 §18.22.3.
+#[tokio::test]
+async fn test_anonymous_read_allowed_when_backend_permits() {
+    let fs = AccessPolicyFs::new(
+        memfs_with_mode("ok.txt", 0o644).await,
+        AccessPolicy::OwnerMode,
+    );
+    let port = start_server_with_fs(fs).await;
+    let read_op = encode_read(0, 1024);
+    assert_eq!(
+        anon_data_op_status(port, "ok.txt", &read_op).await,
+        NfsStat4::Ok as u32
+    );
 }
 
 /// CLOSE on a valid open stateid succeeds.
