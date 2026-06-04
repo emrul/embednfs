@@ -377,6 +377,45 @@ async fn test_open_v41_want_cancel_returns_none_ext_cancelled() {
     assert_eq!(why, Some(WhyNoDelegation4::Cancelled as u32));
 }
 
+/// A v4.1 OPEN that only sets a "signal when available" flag (no delegation
+/// level) still gets `OPEN_DELEGATE_NONE_EXT` with `WND4_NOT_SUPP_FTYPE` — the
+/// server has nothing to signal because it grants no delegations.
+/// Origin: locks down the signal-flag no-delegation response shape.
+/// RFC: RFC 8881 §18.16.3, §10.4.1.
+#[tokio::test]
+async fn test_open_v41_signal_only_returns_none_ext_not_supp() {
+    let fs = populated_fs(&["existing.txt"]).await;
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_nocreate_with_access(
+        "existing.txt",
+        OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_SIGNAL_DELEG_WHEN_RESRC_AVAIL,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    let (deleg_type, why) = open_delegation(port, &open_op).await;
+    assert_eq!(deleg_type, OpenDelegationType4::NoneExt as u32);
+    assert_eq!(why, Some(WhyNoDelegation4::NotSuppFtype as u32));
+}
+
+/// A v4.1 OPEN combining a delegation want with a signal flag is reported by the
+/// want level: `WND4_NOT_SUPP_FTYPE` for a read-delegation want.
+/// Origin: locks down the signal+want no-delegation response shape.
+/// RFC: RFC 8881 §18.16.3, §10.4.1.
+#[tokio::test]
+async fn test_open_v41_want_with_signal_returns_none_ext_not_supp() {
+    let fs = populated_fs(&["existing.txt"]).await;
+    let port = start_server_with_fs(fs).await;
+    let open_op = encode_open_nocreate_with_access(
+        "existing.txt",
+        OPEN4_SHARE_ACCESS_READ
+            | OPEN4_SHARE_ACCESS_WANT_READ_DELEG
+            | OPEN4_SHARE_ACCESS_WANT_SIGNAL_DELEG_WHEN_RESRC_AVAIL,
+        OPEN4_SHARE_DENY_NONE,
+    );
+    let (deleg_type, why) = open_delegation(port, &open_op).await;
+    assert_eq!(deleg_type, OpenDelegationType4::NoneExt as u32);
+    assert_eq!(why, Some(WhyNoDelegation4::NotSuppFtype as u32));
+}
+
 /// A v4.0 OPEN must not carry want-delegation bits — sessions/delegation wants
 /// do not exist at minor version 0, so such a share_access is `NFS4ERR_INVAL`.
 /// Origin: RFC 7530 has no want-delegation bits in share_access.
@@ -495,6 +534,21 @@ async fn test_anonymous_truncate_denied_by_backend_access() {
     assert_eq!(
         anon_data_op_status(port, "ro.txt", &setattr_op).await,
         NfsStat4::Access as u32
+    );
+}
+
+/// SETATTR(size) on a directory returns `NFS4ERR_ISDIR` even when the backend
+/// would deny write — the ISDIR determination precedes the write-access gate.
+/// Origin: error-precedence regression for the truncate access gate.
+/// RFC: RFC 8881 §18.30.3.
+#[tokio::test]
+async fn test_truncate_on_directory_returns_isdir_not_access() {
+    let fs = AccessPolicyFs::new(fs_with_subdir("adir").await, AccessPolicy::ReadOnly);
+    let port = start_server_with_fs(fs).await;
+    let setattr_op = encode_setattr_size(&Stateid4::default(), 0);
+    assert_eq!(
+        anon_data_op_status(port, "adir", &setattr_op).await,
+        NfsStat4::Isdir as u32
     );
 }
 

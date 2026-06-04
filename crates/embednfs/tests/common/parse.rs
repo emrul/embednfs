@@ -170,7 +170,7 @@ pub fn parse_open_res(resp: &mut Bytes) -> (Stateid4, (bool, u64, u64)) {
     let cinfo = parse_change_info(resp);
     let _ = u32::decode(resp).unwrap();
     skip_bitmap(resp);
-    let _ = u32::decode(resp).unwrap();
+    let _ = read_open_delegation(resp);
     (stateid, cinfo)
 }
 
