@@ -5,12 +5,15 @@
 //! returns a restricted access mask from `access`, either derived from the
 //! object's POSIX owner mode bits or fixed to a read-only export.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use bytes::Bytes;
 
 use embednfs::{
     AccessMask, Attrs, CommitSupport, CreateRequest, CreateResult, DirPage, FileSystem, FsResult,
     FsStats, HardLinks, MemFs, ReadResult, RequestContext, SetAttrs, Symlinks, WriteResult,
-    WriteStability, Xattrs,
+    WriteStability, XattrSetMode, Xattrs,
 };
 
 /// How `AccessPolicyFs` decides which access bits to grant.
@@ -28,15 +31,63 @@ pub enum AccessPolicy {
     XattrListOnly,
 }
 
-/// A `MemFs` wrapper that enforces `policy` from its `access` implementation.
+/// Counts how many times each backend `Xattrs` method is actually reached, so a
+/// test can assert that a denied op short-circuits before touching the backend.
+#[derive(Default)]
+pub struct XattrCallCounts {
+    pub list: AtomicUsize,
+    pub get: AtomicUsize,
+    pub set: AtomicUsize,
+    pub remove: AtomicUsize,
+}
+
+/// A `MemFs` wrapper that enforces `policy` from its `access` implementation and
+/// counts the backend `Xattrs` calls that reach the inner filesystem.
 pub struct AccessPolicyFs {
     pub inner: MemFs,
     pub policy: AccessPolicy,
+    pub calls: Arc<XattrCallCounts>,
 }
 
 impl AccessPolicyFs {
     pub fn new(inner: MemFs, policy: AccessPolicy) -> Self {
-        Self { inner, policy }
+        Self {
+            inner,
+            policy,
+            calls: Arc::new(XattrCallCounts::default()),
+        }
+    }
+
+    /// Returns a shared handle to the backend `Xattrs` call counters.
+    pub fn calls(&self) -> Arc<XattrCallCounts> {
+        self.calls.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Xattrs<u64> for AccessPolicyFs {
+    async fn list_xattrs(&self, ctx: &RequestContext, id: &u64) -> FsResult<Vec<String>> {
+        let _ = self.calls.list.fetch_add(1, Ordering::Relaxed);
+        self.inner.list_xattrs(ctx, id).await
+    }
+    async fn get_xattr(&self, ctx: &RequestContext, id: &u64, name: &str) -> FsResult<Bytes> {
+        let _ = self.calls.get.fetch_add(1, Ordering::Relaxed);
+        self.inner.get_xattr(ctx, id, name).await
+    }
+    async fn set_xattr(
+        &self,
+        ctx: &RequestContext,
+        id: &u64,
+        name: &str,
+        value: Bytes,
+        mode: XattrSetMode,
+    ) -> FsResult<()> {
+        let _ = self.calls.set.fetch_add(1, Ordering::Relaxed);
+        self.inner.set_xattr(ctx, id, name, value, mode).await
+    }
+    async fn remove_xattr(&self, ctx: &RequestContext, id: &u64, name: &str) -> FsResult<()> {
+        let _ = self.calls.remove.fetch_add(1, Ordering::Relaxed);
+        self.inner.remove_xattr(ctx, id, name).await
     }
 }
 
@@ -188,7 +239,11 @@ impl FileSystem for AccessPolicyFs {
         self.inner.hard_links()
     }
     fn xattrs(&self) -> Option<&dyn Xattrs<Self::Handle>> {
-        self.inner.xattrs()
+        // Route through the counting wrapper (not the inner FS) so tests can
+        // observe whether a denied op reached the backend.
+        self.inner
+            .xattrs()
+            .map(|_| self as &dyn Xattrs<Self::Handle>)
     }
     fn commit_support(&self) -> Option<&dyn CommitSupport<Self::Handle>> {
         self.inner.commit_support()

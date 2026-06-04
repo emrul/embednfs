@@ -321,6 +321,18 @@ impl<F: FileSystem> NfsServer<F> {
             Err(status) => return NfsResop4::Readdir(status, None),
         };
 
+        // Gate the synthetic attribute directory on the parent's XATTR_LIST
+        // right before `build_attr`, which itself lists the parent's attributes
+        // to size the directory — the backend must not be touched ahead of the
+        // central policy check.
+        if let ServerObject::NamedAttrDir(parent) = &object
+            && let Err(status) = self
+                .require_access(request_ctx, *parent, AccessMask::XATTR_LIST)
+                .await
+        {
+            return NfsResop4::Readdir(status, None);
+        }
+
         let dir_attr = match self.build_attr(request_ctx, &object).await {
             Ok(attr) => attr,
             Err(e) => return NfsResop4::Readdir(e.to_nfsstat4(), None),
@@ -382,14 +394,7 @@ impl<F: FileSystem> NfsServer<F> {
                     Some(named) => named,
                     None => return NfsResop4::Readdir(NfsStat4::Notsupp, None),
                 };
-                // Listing the synthetic attribute directory requires the
-                // parent's XATTR_LIST right (RFC 8276 §5.2), gated centrally.
-                if let Err(status) = self
-                    .require_access(request_ctx, parent, AccessMask::XATTR_LIST)
-                    .await
-                {
-                    return NfsResop4::Readdir(status, None);
-                }
+                // XATTR_LIST was already required up front, before build_attr.
                 let parent_handle = match self.resolve_backend_handle(parent).await {
                     Ok(handle) => handle,
                     Err(e) => return NfsResop4::Readdir(e.to_nfsstat4(), None),
@@ -525,6 +530,18 @@ impl<F: FileSystem> NfsServer<F> {
             Err(status) => return NfsResop4::Remove(status, None),
         };
 
+        // Removing a named attribute mutates the parent's xattr namespace and
+        // requires its XATTR_WRITE right (RFC 8276 §5.3). Gate it before
+        // `build_attr`, which lists the parent's attributes, so the backend is
+        // never touched ahead of the central policy check.
+        if let ServerObject::NamedAttrDir(parent) = &dir_object
+            && let Err(status) = self
+                .require_access(request_ctx, *parent, AccessMask::XATTR_WRITE)
+                .await
+        {
+            return NfsResop4::Remove(status, None);
+        }
+
         let dir_attr_before = match self.build_attr(request_ctx, &dir_object).await {
             Ok(attr) => attr,
             Err(e) => return NfsResop4::Remove(e.to_nfsstat4(), None),
@@ -554,15 +571,7 @@ impl<F: FileSystem> NfsServer<F> {
                     Some(named) => named,
                     None => return NfsResop4::Remove(NfsStat4::Notsupp, None),
                 };
-                // Removing a named attribute mutates the parent's xattr
-                // namespace and requires its XATTR_WRITE right (RFC 8276 §5.3),
-                // gated centrally before the backend mutation.
-                if let Err(status) = self
-                    .require_access(request_ctx, parent, AccessMask::XATTR_WRITE)
-                    .await
-                {
-                    return NfsResop4::Remove(status, None);
-                }
+                // XATTR_WRITE was already required up front, before build_attr.
                 let parent_handle = match self.resolve_backend_handle(parent).await {
                     Ok(handle) => handle,
                     Err(e) => return NfsResop4::Remove(e.to_nfsstat4(), None),

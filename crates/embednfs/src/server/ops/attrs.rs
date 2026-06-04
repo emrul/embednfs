@@ -172,6 +172,18 @@ impl<F: FileSystem> NfsServer<F> {
             Err(status) => return NfsResop4::Setattr(status, Bitmap4::new()),
         };
 
+        // A named-attribute resize mutates the backend value; require the
+        // parent's XATTR_WRITE right before `build_attr` below reads it to size
+        // the truncation, so the backend is not touched ahead of the gate.
+        if set_attrs.size.is_some()
+            && let ServerObject::NamedAttrFile { parent, .. } = &object
+            && let Err(status) = self
+                .require_access(request_ctx, *parent, AccessMask::XATTR_WRITE)
+                .await
+        {
+            return NfsResop4::Setattr(status, Bitmap4::new());
+        }
+
         let current_attr = if set_attrs.size.is_some()
             || (self.delegation_config.directory_delegations && !set_attrs.is_empty())
         {
@@ -231,18 +243,11 @@ impl<F: FileSystem> NfsServer<F> {
                 Err(e) => e.to_nfsstat4(),
             },
             ServerObject::NamedAttrFile { parent, name } => {
-                if let Some(size) = set_attrs.size {
-                    // Resizing a named attribute mutates its backend value;
-                    // gate it on the parent's XATTR_WRITE right before the write.
-                    if let Err(status) = self
-                        .require_access(request_ctx, parent, AccessMask::XATTR_WRITE)
-                        .await
-                    {
-                        return NfsResop4::Setattr(status, Bitmap4::new());
-                    }
-                    if let Err(e) = self.xattr_resize(request_ctx, parent, &name, size).await {
-                        return NfsResop4::Setattr(e.to_nfsstat4(), Bitmap4::new());
-                    }
+                // XATTR_WRITE for a resize was already required up front.
+                if let Some(size) = set_attrs.size
+                    && let Err(e) = self.xattr_resize(request_ctx, parent, &name, size).await
+                {
+                    return NfsResop4::Setattr(e.to_nfsstat4(), Bitmap4::new());
                 }
                 self.state
                     .apply_setattr(&object, ServerFileType::NamedAttr, &set_attrs)

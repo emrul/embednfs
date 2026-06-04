@@ -960,6 +960,141 @@ fn access_after_prefix(resp: &mut Bytes) -> (u32, u32) {
     }
 }
 
+// ===== OPEN must not leak attribute existence to an unauthorized caller =====
+
+/// OPEN4_NOCREATE of a missing attribute returns `NFS4ERR_ACCESS`, not
+/// `NFS4ERR_NOENT`, when the parent withholds XATTR_READ — the existence probe
+/// runs only after the up-front gate, so absence cannot leak.
+/// Origin: OPEN existence-leak closure for the synthetic attribute namespace.
+/// RFC: RFC 8881 §5.3, §18.16.3; RFC 8276 §5.2.
+#[tokio::test]
+async fn test_named_attr_nocreate_open_missing_denied_without_xattr_read() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o000, None).await,
+        AccessPolicy::OwnerMode,
+    );
+    let open_op = encode_open_nocreate("user.missing");
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// OPEN4_NOCREATE of a missing attribute still returns `NFS4ERR_NOENT` to a
+/// caller the parent grants XATTR_READ — absence is reported only to the
+/// authorized.
+/// Origin: positive control for OPEN existence reporting.
+/// RFC: RFC 8881 §5.3, §18.16.3.
+#[tokio::test]
+async fn test_named_attr_nocreate_open_missing_noent_when_readable() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, None).await,
+        AccessPolicy::OwnerMode,
+    );
+    let open_op = encode_open_nocreate("user.missing");
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Noent as u32
+    );
+}
+
+/// OPEN(CREATE, GUARDED) of an existing attribute returns `NFS4ERR_ACCESS`, not
+/// `NFS4ERR_EXIST`, when the parent withholds XATTR_WRITE — presence cannot leak
+/// to a caller who could not have created it.
+/// Origin: OPEN existence-leak closure for the synthetic attribute namespace.
+/// RFC: RFC 8881 §5.3, §18.16.3; RFC 8276 §5.3.
+#[tokio::test]
+async fn test_named_attr_guarded_create_existing_denied_without_xattr_write() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let open_op = encode_open_create_guarded("user.demo");
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Access as u32
+    );
+}
+
+/// OPEN(CREATE, GUARDED) of an existing attribute still returns `NFS4ERR_EXIST`
+/// to a caller the parent grants XATTR_WRITE.
+/// Origin: positive control for OPEN existence reporting.
+/// RFC: RFC 8881 §5.3, §18.16.3.
+#[tokio::test]
+async fn test_named_attr_guarded_create_existing_exist_when_writable() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o644, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let open_op = encode_open_create_guarded("user.demo");
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Exist as u32
+    );
+}
+
+// ===== A denied synthetic-namespace op must not touch the backend first =====
+
+/// A denied READDIR never reaches the backend `list_xattrs` — the XATTR_LIST
+/// gate runs before `build_attr` lists the parent's attributes.
+/// Origin: ordering guarantee for the central named-attribute gate.
+/// RFC: RFC 8881 §5.3, §18.23.3; RFC 8276 §5.2.
+#[tokio::test]
+async fn test_named_attr_readdir_denial_does_not_touch_backend() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o000, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let calls = fs.calls();
+    let readdir_op = encode_readdir_custom(0, [0u8; 8], 4096, 8192, &[FATTR4_TYPE]);
+    assert_eq!(
+        named_attr_tail_status(fs, &[&readdir_op]).await,
+        NfsStat4::Access as u32
+    );
+    assert_eq!(calls.list.load(Ordering::Relaxed), 0);
+}
+
+/// A denied REMOVE never reaches the backend — neither the `build_attr`
+/// listing nor `remove_xattr` runs ahead of the XATTR_WRITE gate.
+/// Origin: ordering guarantee for the central named-attribute gate.
+/// RFC: RFC 8881 §5.3, §18.25.3; RFC 8276 §5.3.
+#[tokio::test]
+async fn test_named_attr_remove_denial_does_not_touch_backend() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, Some(("user.demo", b"value"))).await,
+        AccessPolicy::OwnerMode,
+    );
+    let calls = fs.calls();
+    let remove_op = encode_remove("user.demo");
+    assert_eq!(
+        named_attr_tail_status(fs, &[&remove_op]).await,
+        NfsStat4::Access as u32
+    );
+    assert_eq!(calls.list.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.remove.load(Ordering::Relaxed), 0);
+}
+
+/// A denied OPEN+CREATE never probes or writes the backend — the up-front gate
+/// precedes both the existence probe and the create.
+/// Origin: ordering guarantee for the OPEN existence-leak fix.
+/// RFC: RFC 8881 §5.3, §18.16.3; RFC 8276 §5.3.
+#[tokio::test]
+async fn test_named_attr_open_create_denial_does_not_touch_backend() {
+    let fs = AccessPolicyFs::new(
+        file_with_mode_xattr("notes.txt", 0o444, None).await,
+        AccessPolicy::OwnerMode,
+    );
+    let calls = fs.calls();
+    let open_op = encode_open_create("user.new");
+    assert_eq!(
+        named_attr_open_status(fs, true, &open_op).await,
+        NfsStat4::Access as u32
+    );
+    assert_eq!(calls.get.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.set.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.list.load(Ordering::Relaxed), 0);
+}
+
 /// GETATTR on a file caches its named-attribute summary.
 /// Origin: implementation-specific cache behavior.
 /// RFC: RFC 8881 §5.3, §18.7.3.
