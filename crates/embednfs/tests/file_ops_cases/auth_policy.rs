@@ -76,6 +76,30 @@ async fn test_sys_only_server_advertises_only_sys() {
     );
 }
 
+/// A sys-only server accepts the AUTH_NONE NULL procedure probe.
+/// Origin: Linux NFSv4.1 mount probe observed by portal-sync Phase-5 fleet replication test.
+/// RFC: RFC 5531 §11.1; RFC 8881 §16.1.
+#[tokio::test]
+async fn test_sys_only_accepts_auth_none_null_procedure() {
+    let port = start_server_with_auth_policy(AuthPolicy::sys_only()).await;
+    let mut stream = connect(port).await;
+
+    let mut resp = send_rpc_with_auth(
+        &mut stream,
+        9,
+        0,
+        &[],
+        &OpaqueAuth::null(),
+        &OpaqueAuth::null(),
+    )
+    .await;
+
+    let (xid, accept_stat) = parse_rpc_reply_fields(&mut resp);
+    assert_eq!(xid, 9);
+    assert_eq!(accept_stat, 0);
+    assert!(resp.is_empty());
+}
+
 /// A sys-only server rejects an AUTH_NONE operation at the RPC layer with
 /// `AUTH_TOOWEAK`. The reply is MSG_DENIED, so the COMPOUND is never decoded and
 /// the backend is never reached.

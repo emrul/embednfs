@@ -58,10 +58,12 @@ impl IdMapper for NumericIdMapper {
 
 /// Which RPC authentication flavors the server accepts and advertises.
 ///
-/// A request whose credential flavor is not in this set is rejected at the RPC
-/// layer with `AUTH_TOOWEAK`, before any filesystem/backend call runs, and the
-/// same set is what `SECINFO` and `SECINFO_NO_NAME` report. The default accepts
-/// AUTH_SYS and AUTH_NONE, matching the historical behavior.
+/// A non-NULL RPC request whose credential flavor is not in this set is rejected
+/// at the RPC layer with `AUTH_TOOWEAK`, before any filesystem/backend call
+/// runs, and the same set is what `SECINFO` and `SECINFO_NO_NAME` report. RPC
+/// NULL is accepted under any auth flavor because it is the standard no-op
+/// round-trip probe. The default accepts AUTH_SYS and AUTH_NONE, matching the
+/// historical behavior.
 ///
 /// Only AUTH_SYS and AUTH_NONE are meaningfully authenticated by this server.
 /// Other flavors may be listed, in which case they are advertised and accepted
@@ -81,8 +83,9 @@ impl AuthPolicy {
         }
     }
 
-    /// Accepts only AUTH_SYS — a request must carry AUTH_SYS credentials, and
-    /// AUTH_NONE (or anything else) is rejected with `AUTH_TOOWEAK`.
+    /// Accepts only AUTH_SYS — a non-NULL request must carry AUTH_SYS
+    /// credentials, and AUTH_NONE (or anything else) is rejected with
+    /// `AUTH_TOOWEAK`.
     pub fn sys_only() -> Self {
         Self::new([AuthFlavor::Sys])
     }

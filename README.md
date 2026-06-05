@@ -112,15 +112,16 @@ ports/exports differ. Override it with `EMBEDNFS_SERVER_OWNER_MAJOR_ID`,
 ## Authentication Flavors
 
 By default the server accepts and advertises AUTH_SYS and AUTH_NONE. Restrict
-the accepted RPC authentication flavors with an `AuthPolicy`; a request whose
-credential flavor is not allowed is rejected at the RPC layer with
+the accepted RPC authentication flavors with an `AuthPolicy`; a non-NULL RPC
+request whose credential flavor is not allowed is rejected at the RPC layer with
 `AUTH_TOOWEAK`, before any filesystem call, and `SECINFO` / `SECINFO_NO_NAME`
-advertise exactly the configured flavors:
+advertise exactly the configured flavors. RPC NULL is always accepted because it
+is the standard no-op round-trip probe:
 
 ```rust
 use embednfs::{AuthPolicy, NfsServer};
 
-// Require AUTH_SYS on every request; reject AUTH_NONE at the protocol boundary.
+// Require AUTH_SYS on every non-NULL request.
 let server = NfsServer::builder(fs)
     .auth_policy(AuthPolicy::sys_only())
     .build();

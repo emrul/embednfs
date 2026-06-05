@@ -155,13 +155,18 @@ impl<F: FileSystem> NfsServer<F> {
             return Some(response.freeze());
         }
 
+        // RPC NULL is the standard no-op probe and does not require auth.
+        if call.proc_num == 0 {
+            encode_rpc_reply_accepted(&mut response, call.xid);
+            return Some(response.freeze());
+        }
+
         if let Err(auth) = self.validate_rpc_auth(&call) {
             encode_rpc_reply_auth_error(&mut response, call.xid, auth);
             return Some(response.freeze());
         }
 
         match call.proc_num {
-            0 => encode_rpc_reply_accepted(&mut response, call.xid),
             1 => {
                 let compound_payload = src.clone();
                 match Compound4Args::decode(&mut src) {
