@@ -246,16 +246,20 @@ impl<F: FileSystem> NfsServer<F> {
                 state.current_fh = Some(args.object.clone());
                 NfsResop4::Putfh(NfsStat4::Ok)
             }
-            NfsArgop4::Putpubfh => {
-                let root_fh = self.state.object_to_fh(&self.root_object().await);
-                state.current_fh = Some(root_fh);
-                NfsResop4::Putpubfh(NfsStat4::Ok)
-            }
-            NfsArgop4::Putrootfh => {
-                let root_fh = self.state.object_to_fh(&self.root_object().await);
-                state.current_fh = Some(root_fh);
-                NfsResop4::Putrootfh(NfsStat4::Ok)
-            }
+            NfsArgop4::Putpubfh => match self.root_object().await {
+                Ok(root) => {
+                    state.current_fh = Some(self.state.object_to_fh(&root));
+                    NfsResop4::Putpubfh(NfsStat4::Ok)
+                }
+                Err(e) => NfsResop4::Putpubfh(e.to_nfsstat4()),
+            },
+            NfsArgop4::Putrootfh => match self.root_object().await {
+                Ok(root) => {
+                    state.current_fh = Some(self.state.object_to_fh(&root));
+                    NfsResop4::Putrootfh(NfsStat4::Ok)
+                }
+                Err(e) => NfsResop4::Putrootfh(e.to_nfsstat4()),
+            },
             NfsArgop4::Read(args) => {
                 self.op_read(
                     request_ctx,

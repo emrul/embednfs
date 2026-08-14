@@ -82,10 +82,12 @@ impl<F: FileSystem> NfsServer<F> {
                     )
                     .await
                 {
-                    Ok(created) => {
-                        let object_id = self.register_handle(&created.handle).await;
-                        (ServerObject::Fs(object_id), ServerFileType::Symlink)
-                    }
+                    Ok(created) => match self.register_handle(&created.handle).await {
+                        Ok(object_id) => (ServerObject::Fs(object_id), ServerFileType::Symlink),
+                        Err(e) => {
+                            return NfsResop4::Create(e.to_nfsstat4(), None, Bitmap4::new());
+                        }
+                    },
                     Err(e) => return NfsResop4::Create(e.to_nfsstat4(), None, Bitmap4::new()),
                 }
             }
@@ -247,7 +249,10 @@ impl<F: FileSystem> NfsServer<F> {
             Err(status) => return NfsResop4::Lookupp(status),
         };
 
-        let root_object = self.root_object().await;
+        let root_object = match self.root_object().await {
+            Ok(root) => root,
+            Err(e) => return NfsResop4::Lookupp(e.to_nfsstat4()),
+        };
         let parent = match object {
             ServerObject::Fs(id) if root_object == ServerObject::Fs(id) => Err(FsError::NotFound),
             ServerObject::Fs(id) => match self.lookup_parent(request_ctx, id).await {
@@ -281,7 +286,10 @@ impl<F: FileSystem> NfsServer<F> {
         let style_status = match style {
             0 => Ok(()),
             1 => {
-                let root_object = self.root_object().await;
+                let root_object = match self.root_object().await {
+                    Ok(root) => root,
+                    Err(e) => return NfsResop4::SecInfoNoName(e.to_nfsstat4(), vec![]),
+                };
                 match object {
                     ServerObject::Fs(id) if root_object == ServerObject::Fs(id) => {
                         Err(NfsStat4::Noent)

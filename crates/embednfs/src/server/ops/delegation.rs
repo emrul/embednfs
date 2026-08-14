@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::hash::Hash;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use embednfs_proto::*;
@@ -396,19 +397,34 @@ where
     /// The predicate is the backend's own membership test; the server does not
     /// interpret handles beyond equality, so no backend policy leaks in here.
     ///
+    /// Retirement is **permanent**: the predicate is kept as a fence, and any
+    /// later attempt to register a handle matching it is refused with
+    /// `NFS4ERR_STALE`. Dropping the current state alone would not be enough —
+    /// a lookup that resolved a handle before the withdrawal can register it
+    /// afterwards, giving the retired object a fresh, valid mapping. The fence
+    /// is installed and the snapshot taken under one lock, so a registration
+    /// either precedes both or is refused by both.
+    ///
+    /// Because fences are never removed, scope the predicate to a generation
+    /// rather than to individual objects if you retire repeatedly.
+    ///
     /// Idempotent: retiring an already-retired set reports zero.
     pub async fn retire_handles<P>(&self, retired: P) -> InvalidationCounts
     where
-        P: Fn(&H) -> bool,
+        P: Fn(&H) -> bool + Send + Sync + 'static,
     {
-        let matched: Vec<(H, ObjectId)> = self
-            .handle_to_object
-            .read()
-            .await
-            .iter()
-            .filter(|(handle, _)| retired(handle))
-            .map(|(handle, id)| (handle.clone(), *id))
-            .collect();
+        let retired = Arc::new(retired);
+        let matched: Vec<(H, ObjectId)> = {
+            // One lock for both, so nothing can register in between. Lock order
+            // is handles-then-fences here and in `register_handle`.
+            let handles = self.handle_to_object.write().await;
+            self.retired.write().await.install(retired.clone());
+            handles
+                .iter()
+                .filter(|(handle, _)| retired(handle))
+                .map(|(handle, id)| (handle.clone(), *id))
+                .collect()
+        };
         if matched.is_empty() {
             return InvalidationCounts::default();
         }

@@ -32,6 +32,7 @@ mod compound;
 mod file_attrs;
 mod objects;
 mod ops;
+mod retirement;
 mod transport;
 
 /// Maps numeric ids to NFS owner/group strings.
@@ -183,6 +184,7 @@ impl<F: FileSystem> NfsServerBuilder<F> {
             handle_to_object: Arc::new(RwLock::new(HashMap::new())),
             object_to_handle: Arc::new(RwLock::new(HashMap::new())),
             next_object_id: AtomicU64::new(1),
+            retired: Arc::new(RwLock::new(retirement::RetirementFences::new())),
             id_mapper: self.id_mapper,
             delegation_config: self.delegation_config,
             auth_policy: self.auth_policy,
@@ -222,6 +224,9 @@ pub struct NfsServer<F: FileSystem> {
     handle_to_object: Arc<RwLock<HashMap<F::Handle, ObjectId>>>,
     object_to_handle: Arc<RwLock<HashMap<ObjectId, F::Handle>>>,
     next_object_id: AtomicU64,
+    /// Retirements in force. Consulted on every registration, so a withdrawn
+    /// handle cannot be re-registered after the fact.
+    retired: Arc<RwLock<retirement::RetirementFences<F::Handle>>>,
     id_mapper: Arc<dyn IdMapper>,
     delegation_config: DelegationConfig,
     auth_policy: AuthPolicy,
@@ -241,6 +246,7 @@ where
     state: Arc<StateManager>,
     handle_to_object: Arc<RwLock<HashMap<H, ObjectId>>>,
     object_to_handle: Arc<RwLock<HashMap<ObjectId, H>>>,
+    retired: Arc<RwLock<retirement::RetirementFences<H>>>,
     delegation_config: DelegationConfig,
     backchannels: Arc<backchannel::BackchannelManager>,
 }
@@ -254,6 +260,7 @@ where
             state: self.state.clone(),
             handle_to_object: self.handle_to_object.clone(),
             object_to_handle: self.object_to_handle.clone(),
+            retired: self.retired.clone(),
             delegation_config: self.delegation_config.clone(),
             backchannels: self.backchannels.clone(),
         }
@@ -283,6 +290,7 @@ impl<F: FileSystem> NfsServer<F> {
             state: self.state.clone(),
             handle_to_object: self.handle_to_object.clone(),
             object_to_handle: self.object_to_handle.clone(),
+            retired: self.retired.clone(),
             delegation_config: self.delegation_config.clone(),
             backchannels: self.backchannels.clone(),
         }
@@ -475,14 +483,14 @@ impl<F: FileSystem> NfsServer<F> {
     ) -> NfsResult<ObjectId> {
         let handle = self.resolve_backend_handle(dir_id).await?;
         let child = self.fs.lookup(ctx, &handle, name).await?;
-        Ok(self.register_handle(&child).await)
+        self.register_handle(&child).await
     }
 
     async fn lookup_parent(&self, ctx: &RequestContext, dir_id: ObjectId) -> NfsResult<ObjectId> {
         let handle = self.resolve_backend_handle(dir_id).await?;
         let parent = self.fs.parent(ctx, &handle).await?;
         match parent {
-            Some(handle) => Ok(self.register_handle(&handle).await),
+            Some(handle) => self.register_handle(&handle).await,
             None => Err(FsError::NotFound),
         }
     }
@@ -534,7 +542,7 @@ impl<F: FileSystem> NfsServer<F> {
             )
             .await?;
         Ok(CreateResult {
-            handle: self.register_handle(&created.handle).await,
+            handle: self.register_handle(&created.handle).await?,
             attrs: created.attrs,
         })
     }
@@ -560,7 +568,7 @@ impl<F: FileSystem> NfsServer<F> {
             )
             .await?;
         Ok(CreateResult {
-            handle: self.register_handle(&created.handle).await,
+            handle: self.register_handle(&created.handle).await?,
             attrs: created.attrs,
         })
     }
@@ -600,7 +608,12 @@ impl<F: FileSystem> NfsServer<F> {
             .await?;
         let mut entries = Vec::with_capacity(page.entries.len());
         for entry in page.entries {
-            let object_id = self.register_handle(&entry.handle).await;
+            // A retired child is omitted rather than failing the whole page:
+            // the retirement removed it from the export, and a readdir of a
+            // still-live parent should keep working.
+            let Ok(object_id) = self.register_handle(&entry.handle).await else {
+                continue;
+            };
             entries.push(DirEntry {
                 name: entry.name,
                 handle: object_id,
