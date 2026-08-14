@@ -25,3 +25,4 @@ pub use server::{
     AuthPolicy, DelegationConfig, IdMapper, NfsServer, NfsServerBuilder, NfsServerControl,
     NumericIdMapper,
 };
+pub use session::InvalidationCounts;

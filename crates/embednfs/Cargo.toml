@@ -18,6 +18,10 @@ workspace = true
 async-trait = "0.1.89"
 bytes = "1.11.1"
 dashmap = "6.1.0"
+# Boot nonce for non-reusable filehandles. Boot *time* is not a safe source:
+# a stepped clock or a VM restored from snapshot can repeat it, which would
+# reintroduce cross-boot filehandle reuse.
+getrandom = "0.3"
 embednfs-proto = { path = "../embednfs-proto", version = "0.4.1" }
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["full"] }

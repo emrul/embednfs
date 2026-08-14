@@ -240,6 +240,7 @@ where
 {
     state: Arc<StateManager>,
     handle_to_object: Arc<RwLock<HashMap<H, ObjectId>>>,
+    object_to_handle: Arc<RwLock<HashMap<ObjectId, H>>>,
     delegation_config: DelegationConfig,
     backchannels: Arc<backchannel::BackchannelManager>,
 }
@@ -252,6 +253,7 @@ where
         Self {
             state: self.state.clone(),
             handle_to_object: self.handle_to_object.clone(),
+            object_to_handle: self.object_to_handle.clone(),
             delegation_config: self.delegation_config.clone(),
             backchannels: self.backchannels.clone(),
         }
@@ -280,6 +282,7 @@ impl<F: FileSystem> NfsServer<F> {
         NfsServerControl {
             state: self.state.clone(),
             handle_to_object: self.handle_to_object.clone(),
+            object_to_handle: self.object_to_handle.clone(),
             delegation_config: self.delegation_config.clone(),
             backchannels: self.backchannels.clone(),
         }
@@ -331,8 +334,14 @@ impl<F: FileSystem> NfsServer<F> {
         self.fs.open_lifecycle()
     }
 
+    /// Cheap shape check before a filehandle is looked up.
+    ///
+    /// Must track the layout minted by `StateManager::object_to_fh` — a boot
+    /// nonce followed by a counter. Hardcoding a width here once meant a
+    /// well-formed handle was rejected as malformed when that layout changed,
+    /// so it reads the shared constant rather than restating the size.
     fn fh_has_valid_format(fh: &NfsFh4) -> bool {
-        fh.0.len() == std::mem::size_of::<u64>()
+        fh.0.len() == crate::session::FH_LEN
     }
 
     fn parse_auth_sys(body: &Bytes) -> Option<AuthSysParams> {

@@ -16,6 +16,7 @@ use crate::internal::ServerObject;
 mod clients;
 mod delegations;
 mod filehandles;
+mod invalidate;
 mod locks;
 mod metadata;
 mod model;
@@ -67,12 +68,37 @@ impl Default for StateConfig {
     }
 }
 
+pub use invalidate::InvalidationCounts;
 use model::StateInner;
 pub(crate) use model::{
     CallbackTarget, DirectoryDelegationGrant, DirectoryDelegationRecall, ResolvedStateid,
     SequenceReplay, SynthMeta,
 };
 pub(crate) use stateids::{CurrentStateidMode, NormalizedStateid};
+
+/// Length of the random per-boot filehandle prefix.
+pub(crate) const FH_NONCE_LEN: usize = 8;
+/// Total opaque filehandle length: boot nonce plus a big-endian counter.
+pub(crate) const FH_LEN: usize = FH_NONCE_LEN + 8;
+
+/// A fresh random filehandle prefix for this server boot.
+///
+/// Falls back to the boot clock only if the OS RNG is unavailable, which keeps
+/// the server startable; the fallback is strictly weaker and is the one case
+/// where a repeated boot time could repeat a nonce.
+fn new_fh_boot_nonce() -> [u8; FH_NONCE_LEN] {
+    let mut nonce = [0u8; FH_NONCE_LEN];
+    if getrandom::fill(&mut nonce).is_err() {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        nonce.copy_from_slice(
+            &(t.as_secs().rotate_left(32) ^ u64::from(t.subsec_nanos())).to_be_bytes(),
+        );
+        tracing::warn!("OS RNG unavailable; filehandle boot nonce fell back to the clock");
+    }
+    nonce
+}
 
 /// Manages all server-side state.
 pub(crate) struct StateManager {
@@ -81,6 +107,19 @@ pub(crate) struct StateManager {
     fh_to_object: DashMap<Vec<u8>, ServerObject>,
     object_to_fh: DashMap<ServerObject, Vec<u8>>,
     next_fh: AtomicU64,
+    /// Random per-boot prefix embedded in every opaque filehandle.
+    ///
+    /// Filehandle bytes must never mean two different objects across server
+    /// restarts. The counter alone cannot promise that: it restarts at 1 and
+    /// the maps are in-memory, so after a restart the same bytes are handed to
+    /// an unrelated object. Prefixing a random per-boot value makes a
+    /// previous boot's handle unrepresentable in this one — it is rejected on
+    /// decode before any lookup, and the client sees `NFS4ERR_STALE`.
+    ///
+    /// Deliberately not derived from the boot clock (as `write_verifier` is):
+    /// a stepped clock or a VM restored from a snapshot can repeat a boot time,
+    /// which would silently reintroduce the reuse it exists to prevent.
+    fh_boot_nonce: [u8; FH_NONCE_LEN],
     next_clientid: AtomicU64,
     next_stateid: AtomicU32,
     next_changeid: AtomicU64,
@@ -131,6 +170,7 @@ impl StateManager {
             fh_to_object: DashMap::new(),
             object_to_fh: DashMap::new(),
             next_fh: AtomicU64::new(1),
+            fh_boot_nonce: new_fh_boot_nonce(),
             next_clientid: AtomicU64::new(1),
             next_stateid: AtomicU32::new(1),
             next_changeid: AtomicU64::new(2),
