@@ -197,6 +197,12 @@ impl StateManager {
         offset: u64,
         length: u64,
     ) -> Result<Stateid4, NfsStat4> {
+        // A retired object may not acquire new state: the invalidation sweep
+        // already ran, so anything created now would survive it.
+        if self.is_retired(&object) {
+            return Err(NfsStat4::Stale);
+        }
+
         self.reap_expired_clients().await;
         self.validate_lock_bounds(offset, length)?;
         let mut inner = self.inner.write().await;

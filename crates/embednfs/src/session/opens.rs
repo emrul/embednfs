@@ -43,6 +43,12 @@ impl StateManager {
         share_access: u32,
         share_deny: u32,
     ) -> Result<Stateid4, NfsStat4> {
+        // A retired object may not acquire new state: the invalidation sweep
+        // already ran, so anything created now would survive it.
+        if self.is_retired(&object) {
+            return Err(NfsStat4::Stale);
+        }
+
         self.reap_expired_clients().await;
         // Store only the access mode. Want/signal hints (the 0xFF00 selector and
         // the signal flags above it) are a protocol-layer concern that `op_open`

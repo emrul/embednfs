@@ -560,7 +560,10 @@ impl<F: FileSystem> NfsServer<F> {
             Err(status) => return NfsResop4::Open(status, None),
         };
 
-        *current_fh = Some(self.state.object_to_fh(&object));
+        let Some(open_fh) = self.state.object_to_fh(&object) else {
+            return NfsResop4::Open(NfsStat4::Stale, None);
+        };
+        *current_fh = Some(open_fh);
 
         let cinfo = if created {
             let before_change = match created_before_change {

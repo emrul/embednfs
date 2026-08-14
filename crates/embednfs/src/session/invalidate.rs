@@ -47,15 +47,41 @@ fn belongs_to(object: &ServerObject, ids: &HashSet<ObjectId>) -> bool {
 }
 
 impl StateManager {
+    /// Whether `object` belongs to something the backend has retired.
+    ///
+    /// Consulted by every path that creates server state, so retirement is a
+    /// standing refusal rather than a one-time sweep.
+    pub(crate) fn is_retired(&self, object: &ServerObject) -> bool {
+        let id = match object {
+            ServerObject::Fs(id) | ServerObject::NamedAttrDir(id) => *id,
+            ServerObject::NamedAttrFile { parent, .. } => *parent,
+        };
+        self.retired_objects.contains(&id)
+    }
+
+    /// Record `ids` as retired, permanently, before anything is dropped.
+    ///
+    /// Separate from the sweep and ordered before it: the sweep answers for
+    /// state that exists *now*, and this answers for state that would be
+    /// created afterwards. Doing it second would leave exactly the window it
+    /// is meant to close.
+    pub(crate) fn mark_retired(&self, ids: &HashSet<ObjectId>) {
+        for id in ids {
+            let _ = self.retired_objects.insert(*id);
+        }
+    }
+
     /// Drop every mapping and piece of client-visible state for `ids`.
     ///
-    /// Idempotent: invalidating an already-invalidated set is a no-op that
-    /// reports zero, so a caller retrying after a partial failure is safe.
+    /// Marks them retired first, so no creation path can replace what this
+    /// drops. Idempotent: invalidating an already-invalidated set is a no-op
+    /// that reports zero, so a caller retrying after a partial failure is safe.
     pub(crate) async fn invalidate_objects(&self, ids: &HashSet<ObjectId>) -> InvalidationCounts {
         let mut counts = InvalidationCounts::default();
         if ids.is_empty() {
             return counts;
         }
+        self.mark_retired(ids);
 
         // Filehandles first: this is the entry point every client operation
         // goes through, so removing it closes the door before the state behind
@@ -165,9 +191,9 @@ mod tests {
     #[tokio::test]
     async fn retiring_drops_filehandles_and_leaves_others_intact() {
         let state = StateManager::new();
-        let retired = state.object_to_fh(&ServerObject::Fs(1));
-        let retired_attr = state.object_to_fh(&ServerObject::NamedAttrDir(1));
-        let kept = state.object_to_fh(&ServerObject::Fs(2));
+        let retired = state.object_to_fh(&ServerObject::Fs(1)).unwrap();
+        let retired_attr = state.object_to_fh(&ServerObject::NamedAttrDir(1)).unwrap();
+        let kept = state.object_to_fh(&ServerObject::Fs(2)).unwrap();
 
         let counts = state.invalidate_objects(&ids(&[1])).await;
         assert_eq!(counts.filehandles, 2, "object and its named-attr dir");
@@ -184,7 +210,7 @@ mod tests {
     #[tokio::test]
     async fn retiring_is_idempotent_and_empty_is_a_no_op() {
         let state = StateManager::new();
-        let _ = state.object_to_fh(&ServerObject::Fs(1));
+        let _ = state.object_to_fh(&ServerObject::Fs(1)).unwrap();
 
         assert_eq!(
             state.invalidate_objects(&ids(&[])).await,
@@ -200,18 +226,55 @@ mod tests {
         );
     }
 
-    /// A retired object must not be able to reappear under its old filehandle
-    /// even if the backend hands out the same object again — the new mapping is
-    /// a fresh filehandle, so old bytes stay dead.
+    /// A retired object cannot get a filehandle at all — not its old one, and
+    /// not a fresh one.
+    ///
+    /// The invalidation sweep runs once. If minting stayed open afterwards, an
+    /// `ObjectId` resolved before the retirement could mint a new, resolvable
+    /// filehandle after it, and the sweep would have no chance to remove it.
     #[tokio::test]
-    async fn a_retired_object_gets_a_new_filehandle_if_it_returns() {
+    async fn a_retired_object_can_never_mint_a_filehandle_again() {
         let state = StateManager::new();
-        let before = state.object_to_fh(&ServerObject::Fs(1));
+        let before = state.object_to_fh(&ServerObject::Fs(1)).unwrap();
         let _ = state.invalidate_objects(&ids(&[1])).await;
-        let after = state.object_to_fh(&ServerObject::Fs(1));
 
-        assert_ne!(before.0, after.0, "the old filehandle must not be reissued");
-        assert_eq!(state.fh_to_object(&before), None);
-        assert_eq!(state.fh_to_object(&after), Some(ServerObject::Fs(1)));
+        assert_eq!(state.fh_to_object(&before), None, "the old handle is dead");
+        assert_eq!(
+            state.object_to_fh(&ServerObject::Fs(1)),
+            None,
+            "and no new handle may be minted for it",
+        );
+        // Its named attributes are covered too.
+        assert_eq!(state.object_to_fh(&ServerObject::NamedAttrDir(1)), None);
+        assert_eq!(
+            state.object_to_fh(&ServerObject::NamedAttrFile {
+                parent: 1,
+                name: "user.x".into(),
+            }),
+            None,
+        );
+        // An unrelated object is unaffected.
+        assert!(state.object_to_fh(&ServerObject::Fs(2)).is_some());
+    }
+
+    /// Retirement blocks minting, not naming: an *existing* mapping is still
+    /// returned, because a delegation recall has to name the handle the client
+    /// already holds. Refusing there would silence the recall rather than
+    /// protect anything.
+    #[tokio::test]
+    async fn a_retired_object_can_still_be_named_while_its_mapping_lives() {
+        let state = StateManager::new();
+        let fh = state.object_to_fh(&ServerObject::Fs(1)).unwrap();
+
+        state.mark_retired(&ids(&[1]));
+        assert_eq!(
+            state.object_to_fh(&ServerObject::Fs(1)),
+            Some(fh),
+            "the recall must still be able to name the object",
+        );
+
+        // Once the sweep has run, the mapping is gone and minting is refused.
+        let _ = state.invalidate_objects(&ids(&[1])).await;
+        assert_eq!(state.object_to_fh(&ServerObject::Fs(1)), None);
     }
 }

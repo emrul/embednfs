@@ -110,6 +110,74 @@ mod retirement_fence {
         assert_ne!(other, id);
     }
 
+    /// The window a fence alone does not close, driven **deterministically**
+    /// rather than by racing.
+    ///
+    /// `register_handle` returns an existing mapping without consulting the
+    /// fence. So the state observable at the moment the fence is installed is
+    /// what matters, and the test drives exactly that instant: install the
+    /// fence via a retirement, then — with no concurrency at all — ask for the
+    /// handle again. If the mapping were still present (as it was while the
+    /// mappings were dropped only after the delegation recall, which can take
+    /// as long as the recall deadline) this would hand back a live object id.
+    #[tokio::test]
+    async fn nothing_is_registrable_the_instant_the_fence_is_installed() {
+        let server = server();
+        let control = server.control_handle();
+
+        let id = server.register_handle(&7).await.expect("registered");
+        let object = crate::internal::ServerObject::Fs(id);
+        let fh = server
+            .state
+            .object_to_fh(&object)
+            .expect("a filehandle was issued");
+
+        let _ = control.retire_handles(|h: &u64| *h == 7).await;
+
+        // The mapping is gone, so the fast path cannot return it …
+        assert!(
+            server.register_handle(&7).await.is_err(),
+            "the fast path must not return a retired mapping",
+        );
+        // … the old filehandle no longer resolves …
+        assert_eq!(server.state.fh_to_object(&fh), None);
+        // … and the already-resolved ObjectId cannot mint a new one.
+        assert_eq!(
+            server.state.object_to_fh(&object),
+            None,
+            "a resolved id must not mint a filehandle after the sweep",
+        );
+    }
+
+    /// An `ObjectId` resolved before a retirement must not be able to create
+    /// server state after it. The sweep runs once; these paths run later.
+    #[tokio::test]
+    async fn a_resolved_id_cannot_create_state_after_retirement() {
+        let server = server();
+        let control = server.control_handle();
+        let id = server.register_handle(&7).await.expect("registered");
+        let object = crate::internal::ServerObject::Fs(id);
+
+        let _ = control.retire_handles(|h: &u64| *h == 7).await;
+
+        assert!(
+            server
+                .state
+                .create_open_state(object.clone(), 1, 1, 0)
+                .await
+                .is_err(),
+            "an OPEN must not be created for a retired object",
+        );
+        assert!(
+            server
+                .state
+                .create_directory_delegation(object, 1, None)
+                .await
+                .is_err(),
+            "a delegation must not be granted for a retired object",
+        );
+    }
+
     /// The race the fence exists for: a lookup that resolved its handle before
     /// the withdrawal registers it after the retirement has taken its snapshot.
     ///
@@ -165,5 +233,6 @@ mod retirement_fence {
         assert!(server.register_handle(&1).await.is_err());
         assert!(server.register_handle(&2).await.is_err());
         assert!(server.register_handle(&3).await.is_ok());
+        assert_eq!(server.retired.read().await.len(), 2, "both fences stand");
     }
 }

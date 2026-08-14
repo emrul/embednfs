@@ -210,7 +210,11 @@ async fn recall_directory_delegations(
         return Ok(());
     }
 
-    let fh = state.object_to_fh(object);
+    // No filehandle was ever issued for this object, so no client can hold a
+    // delegation naming it.
+    let Some(fh) = state.object_to_fh(object) else {
+        return Ok(());
+    };
     for recall in &recalls {
         if recall.send_callback
             && let Err(status) =
@@ -415,19 +419,40 @@ where
     {
         let retired = Arc::new(retired);
         let matched: Vec<(H, ObjectId)> = {
-            // One lock for both, so nothing can register in between. Lock order
-            // is handles-then-fences here and in `register_handle`.
-            let handles = self.handle_to_object.write().await;
+            // Fence, snapshot, **and unmap**, all under the one lock that
+            // registration takes.
+            //
+            // Removing the mappings here rather than at the end is what closes
+            // the fast path: `register_handle` returns an existing mapping
+            // without consulting the fence, so leaving matching mappings in
+            // place across the recall — which can take as long as the recall
+            // deadline — would let a registration keep succeeding long after
+            // the fence was installed.
+            let mut handles = self.handle_to_object.write().await;
             self.retired.write().await.install(retired.clone());
-            handles
+
+            let matched: Vec<(H, ObjectId)> = handles
                 .iter()
                 .filter(|(handle, _)| retired(handle))
                 .map(|(handle, id)| (handle.clone(), *id))
-                .collect()
+                .collect();
+
+            let mut object_to_handle = self.object_to_handle.write().await;
+            for (handle, object_id) in &matched {
+                let _ = handles.remove(handle);
+                let _ = object_to_handle.remove(object_id);
+            }
+            matched
         };
         if matched.is_empty() {
             return InvalidationCounts::default();
         }
+
+        // Mark the objects retired before the recall, not just before the
+        // sweep: the recall awaits, and an ObjectId resolved earlier must not
+        // be able to mint a filehandle or open state while it does.
+        let ids: HashSet<ObjectId> = matched.iter().map(|(_, id)| *id).collect();
+        self.state.mark_retired(&ids);
 
         // Tell cooperating clients before the state vanishes.
         for (_, object_id) in &matched {
@@ -448,20 +473,7 @@ where
             }
         }
 
-        let ids: HashSet<ObjectId> = matched.iter().map(|(_, id)| *id).collect();
         let counts = self.state.invalidate_objects(&ids).await;
-
-        // Drop the object mappings last: while they exist an in-flight compound
-        // can still translate an id it already resolved, and dropping them
-        // first would only turn that into a different error.
-        {
-            let mut handle_to_object = self.handle_to_object.write().await;
-            let mut object_to_handle = self.object_to_handle.write().await;
-            for (handle, object_id) in &matched {
-                let _ = handle_to_object.remove(handle);
-                let _ = object_to_handle.remove(object_id);
-            }
-        }
 
         tracing::info!(
             objects = matched.len(),

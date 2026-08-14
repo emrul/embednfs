@@ -97,7 +97,9 @@ impl<F: FileSystem> NfsServer<F> {
             _ => return NfsResop4::Create(NfsStat4::Notsupp, None, Bitmap4::new()),
         };
 
-        let new_fh = self.state.object_to_fh(&new_object);
+        let Some(new_fh) = self.state.object_to_fh(&new_object) else {
+            return NfsResop4::Create(NfsStat4::Stale, None, Bitmap4::new());
+        };
         *current_fh = Some(new_fh);
 
         let cinfo = self
@@ -231,10 +233,13 @@ impl<F: FileSystem> NfsServer<F> {
         };
 
         match child {
-            Ok(child) => {
-                *current_fh = Some(self.state.object_to_fh(&child));
-                NfsResop4::Lookup(NfsStat4::Ok)
-            }
+            Ok(child) => match self.state.object_to_fh(&child) {
+                Some(fh) => {
+                    *current_fh = Some(fh);
+                    NfsResop4::Lookup(NfsStat4::Ok)
+                }
+                None => NfsResop4::Lookup(NfsStat4::Stale),
+            },
             Err(e) => NfsResop4::Lookup(e.to_nfsstat4()),
         }
     }
@@ -264,10 +269,13 @@ impl<F: FileSystem> NfsServer<F> {
         };
 
         match parent {
-            Ok(parent) => {
-                *current_fh = Some(self.state.object_to_fh(&parent));
-                NfsResop4::Lookupp(NfsStat4::Ok)
-            }
+            Ok(parent) => match self.state.object_to_fh(&parent) {
+                Some(fh) => {
+                    *current_fh = Some(fh);
+                    NfsResop4::Lookupp(NfsStat4::Ok)
+                }
+                None => NfsResop4::Lookupp(NfsStat4::Stale),
+            },
             Err(e) => NfsResop4::Lookupp(e.to_nfsstat4()),
         }
     }
@@ -483,7 +491,11 @@ impl<F: FileSystem> NfsServer<F> {
                 capabilities: &caps,
                 minorversion,
             };
-            let entry_fh = self.state.object_to_fh(object);
+            // A retired entry is skipped: it has left the export, and the
+            // page for a still-live parent should keep working.
+            let Some(entry_fh) = self.state.object_to_fh(object) else {
+                continue;
+            };
             let result_entry = Entry4 {
                 cookie: *cookie,
                 name: name.clone(),
@@ -702,7 +714,10 @@ impl<F: FileSystem> NfsServer<F> {
             .state
             .ensure_meta(&attrdir, ServerFileType::NamedAttrDir)
             .await;
-        *current_fh = Some(self.state.object_to_fh(&attrdir));
+        let Some(fh) = self.state.object_to_fh(&attrdir) else {
+            return NfsResop4::OpenAttr(NfsStat4::Stale);
+        };
+        *current_fh = Some(fh);
         NfsResop4::OpenAttr(NfsStat4::Ok)
     }
 }

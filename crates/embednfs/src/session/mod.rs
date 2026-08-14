@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use embednfs_proto::{ServerOwner4, Verifier4};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
@@ -106,6 +106,15 @@ pub(crate) struct StateManager {
     /// Lock-free file handle mappings (hot path).
     fh_to_object: DashMap<Vec<u8>, ServerObject>,
     object_to_fh: DashMap<ServerObject, Vec<u8>>,
+    /// Objects the backend has retired. Permanent.
+    ///
+    /// Dropping the state for a retired object is a one-time sweep, and a
+    /// sweep cannot stop the *next* piece of state from being created: an
+    /// `ObjectId` resolved before the retirement can still mint a filehandle,
+    /// an OPEN, a lock or a delegation afterwards. This set is what makes the
+    /// retirement outlive the sweep — every creation path consults it, so a
+    /// retired object can never acquire new server state.
+    retired_objects: DashSet<crate::internal::ObjectId>,
     next_fh: AtomicU64,
     /// Random per-boot prefix embedded in every opaque filehandle.
     ///
@@ -169,6 +178,7 @@ impl StateManager {
             })),
             fh_to_object: DashMap::new(),
             object_to_fh: DashMap::new(),
+            retired_objects: DashSet::new(),
             next_fh: AtomicU64::new(1),
             fh_boot_nonce: new_fh_boot_nonce(),
             next_clientid: AtomicU64::new(1),

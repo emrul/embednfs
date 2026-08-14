@@ -13,9 +13,22 @@ impl StateManager {
     /// Layout is `[boot nonce | counter]`, big-endian counter. The nonce makes
     /// the bytes unique to this server boot, so a handle from a previous boot
     /// can never be mistaken for one of ours — see `fh_boot_nonce`.
-    pub(crate) fn object_to_fh(&self, object: &ServerObject) -> embednfs_proto::NfsFh4 {
+    /// Mint (or reuse) the opaque filehandle for `object`.
+    ///
+    /// Retirement blocks **minting**, not naming.
+    ///
+    /// An existing mapping is still returned for a retired object, because a
+    /// delegation recall has to name the very handle the client already holds,
+    /// and refusing there would silence the recall instead of protecting
+    /// anything. What must not happen is a *new* filehandle appearing after the
+    /// invalidation sweep: the sweep runs once, so anything minted afterwards
+    /// would outlive it and resolve. Hence `None` only on the minting path.
+    pub(crate) fn object_to_fh(&self, object: &ServerObject) -> Option<embednfs_proto::NfsFh4> {
         if let Some(fh) = self.object_to_fh.get(object) {
-            return embednfs_proto::NfsFh4(fh.value().clone().into());
+            return Some(embednfs_proto::NfsFh4(fh.value().clone().into()));
+        }
+        if self.is_retired(object) {
+            return None;
         }
         let fh_num = self
             .next_fh
@@ -25,7 +38,7 @@ impl StateManager {
         fh.extend_from_slice(&fh_num.to_be_bytes());
         let _ = self.fh_to_object.insert(fh.clone(), object.clone());
         let _ = self.object_to_fh.insert(object.clone(), fh.clone());
-        embednfs_proto::NfsFh4(fh.into())
+        Some(embednfs_proto::NfsFh4(fh.into()))
     }
 
     /// Resolve an opaque filehandle, rejecting anything not minted by this boot.
@@ -67,7 +80,7 @@ mod tests {
     #[test]
     fn a_filehandle_carries_this_boot_nonce_and_round_trips() {
         let state = StateManager::new();
-        let fh = state.object_to_fh(&object(7));
+        let fh = state.object_to_fh(&object(7)).unwrap();
         assert_eq!(fh.0.len(), FH_LEN);
         assert_eq!(&fh.0[..FH_NONCE_LEN], &state.fh_boot_nonce());
         assert_eq!(state.fh_to_object(&fh), Some(object(7)));
@@ -77,12 +90,12 @@ mod tests {
     fn the_same_object_keeps_one_filehandle() {
         let state = StateManager::new();
         assert_eq!(
-            state.object_to_fh(&object(1)),
-            state.object_to_fh(&object(1))
+            state.object_to_fh(&object(1)).unwrap(),
+            state.object_to_fh(&object(1)).unwrap()
         );
         assert_ne!(
-            state.object_to_fh(&object(1)),
-            state.object_to_fh(&object(2))
+            state.object_to_fh(&object(1)).unwrap(),
+            state.object_to_fh(&object(2)).unwrap()
         );
     }
 
@@ -95,7 +108,7 @@ mod tests {
     #[test]
     fn a_previous_boots_filehandle_never_resolves_after_restart() {
         let first = StateManager::new();
-        let captured = first.object_to_fh(&object(42));
+        let captured = first.object_to_fh(&object(42)).unwrap();
 
         let second = StateManager::new();
         // Advance well past the captured counter value, which is exactly the
@@ -112,7 +125,8 @@ mod tests {
         // And the collision it would have had: same counter, different nonce.
         let same_counter = second.object_to_fh(&object(42));
         assert_ne!(
-            same_counter.0, captured.0,
+            same_counter.unwrap().0,
+            captured.0,
             "two boots must not mint identical filehandle bytes",
         );
     }
@@ -120,7 +134,7 @@ mod tests {
     #[test]
     fn a_malformed_or_truncated_filehandle_is_rejected() {
         let state = StateManager::new();
-        let good = state.object_to_fh(&object(3));
+        let good = state.object_to_fh(&object(3)).unwrap();
         for bad in [
             embednfs_proto::NfsFh4(bytes::Bytes::from_static(&[])),
             embednfs_proto::NfsFh4(bytes::Bytes::from_static(&[0u8; 8])),

@@ -247,17 +247,23 @@ impl<F: FileSystem> NfsServer<F> {
                 NfsResop4::Putfh(NfsStat4::Ok)
             }
             NfsArgop4::Putpubfh => match self.root_object().await {
-                Ok(root) => {
-                    state.current_fh = Some(self.state.object_to_fh(&root));
-                    NfsResop4::Putpubfh(NfsStat4::Ok)
-                }
+                Ok(root) => match self.state.object_to_fh(&root) {
+                    Some(fh) => {
+                        state.current_fh = Some(fh);
+                        NfsResop4::Putpubfh(NfsStat4::Ok)
+                    }
+                    None => NfsResop4::Putpubfh(NfsStat4::Stale),
+                },
                 Err(e) => NfsResop4::Putpubfh(e.to_nfsstat4()),
             },
             NfsArgop4::Putrootfh => match self.root_object().await {
-                Ok(root) => {
-                    state.current_fh = Some(self.state.object_to_fh(&root));
-                    NfsResop4::Putrootfh(NfsStat4::Ok)
-                }
+                Ok(root) => match self.state.object_to_fh(&root) {
+                    Some(fh) => {
+                        state.current_fh = Some(fh);
+                        NfsResop4::Putrootfh(NfsStat4::Ok)
+                    }
+                    None => NfsResop4::Putrootfh(NfsStat4::Stale),
+                },
                 Err(e) => NfsResop4::Putrootfh(e.to_nfsstat4()),
             },
             NfsArgop4::Read(args) => {
