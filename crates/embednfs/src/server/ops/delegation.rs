@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -6,9 +7,10 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 use crate::fs::{FileSystem, FsError, FsResult, RequestContext};
-use crate::internal::{ServerFileType, ServerObject};
+use crate::internal::{ObjectId, ServerFileType, ServerObject};
 use crate::session::{
-    CallbackTarget, DirectoryDelegationGrant, DirectoryDelegationRecall, StateManager,
+    CallbackTarget, DirectoryDelegationGrant, DirectoryDelegationRecall, InvalidationCounts,
+    StateManager,
 };
 
 use super::super::backchannel::{BackchannelManager, CallbackError, CallbackRequest};
@@ -369,5 +371,90 @@ fn recall_status_to_fs_error(status: NfsStat4) -> FsError {
         NfsStat4::Notsupp => FsError::Unsupported,
         NfsStat4::Delay | NfsStat4::CbPathDown => FsError::Io,
         _ => FsError::ServerFault,
+    }
+}
+
+impl<H> NfsServerControl<H>
+where
+    H: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    /// Retire every backend object whose handle satisfies `retired`, dropping
+    /// all server state that names it.
+    ///
+    /// For a backend that can withdraw part of its export at runtime. Refusing
+    /// operations at the backend is necessary but not sufficient: without this,
+    /// the server keeps filehandle mappings that still resolve, OPEN and lock
+    /// state, and delegations that leave a client believing it owns cached
+    /// state for objects the backend has retired.
+    ///
+    /// Directory delegations are recalled first, best-effort and bounded by the
+    /// server's existing recall policy, so a cooperating client is told before
+    /// its state disappears. A recall that cannot be delivered does not block
+    /// retirement — the state is dropped regardless, and the client discovers it
+    /// on next use. Withdrawal must not depend on a client answering.
+    ///
+    /// The predicate is the backend's own membership test; the server does not
+    /// interpret handles beyond equality, so no backend policy leaks in here.
+    ///
+    /// Idempotent: retiring an already-retired set reports zero.
+    pub async fn retire_handles<P>(&self, retired: P) -> InvalidationCounts
+    where
+        P: Fn(&H) -> bool,
+    {
+        let matched: Vec<(H, ObjectId)> = self
+            .handle_to_object
+            .read()
+            .await
+            .iter()
+            .filter(|(handle, _)| retired(handle))
+            .map(|(handle, id)| (handle.clone(), *id))
+            .collect();
+        if matched.is_empty() {
+            return InvalidationCounts::default();
+        }
+
+        // Tell cooperating clients before the state vanishes.
+        for (_, object_id) in &matched {
+            if let Err(status) = recall_directory_delegations(
+                &self.state,
+                &self.backchannels,
+                &self.delegation_config,
+                &ServerObject::Fs(*object_id),
+                None,
+            )
+            .await
+            {
+                tracing::debug!(
+                    object_id = *object_id,
+                    ?status,
+                    "retire_handles: delegation recall failed; retiring anyway",
+                );
+            }
+        }
+
+        let ids: HashSet<ObjectId> = matched.iter().map(|(_, id)| *id).collect();
+        let counts = self.state.invalidate_objects(&ids).await;
+
+        // Drop the object mappings last: while they exist an in-flight compound
+        // can still translate an id it already resolved, and dropping them
+        // first would only turn that into a different error.
+        {
+            let mut handle_to_object = self.handle_to_object.write().await;
+            let mut object_to_handle = self.object_to_handle.write().await;
+            for (handle, object_id) in &matched {
+                let _ = handle_to_object.remove(handle);
+                let _ = object_to_handle.remove(object_id);
+            }
+        }
+
+        tracing::info!(
+            objects = matched.len(),
+            filehandles = counts.filehandles,
+            opens = counts.opens,
+            locks = counts.locks,
+            delegations = counts.delegations,
+            "retired backend objects and dropped their server state",
+        );
+        counts
     }
 }
