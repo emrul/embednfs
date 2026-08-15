@@ -367,6 +367,42 @@ mod tests {
         );
     }
 
+    /// The same window for lock state, which needs a live OPEN first — so the
+    /// probe is installed only after that OPEN exists, and fires on the lock.
+    #[tokio::test]
+    async fn a_retirement_inside_the_lock_window_refuses_the_lock() {
+        use embednfs_proto::{NfsLockType4, StateOwner4};
+
+        let state = StateManager::new();
+        let object = ServerObject::Fs(1);
+        let open = state
+            .create_open_state(object.clone(), 1, OPEN4_SHARE_ACCESS_READ, 0)
+            .await
+            .expect("the open predates the retirement");
+
+        let retired = state.retired_set();
+        state.set_retire_probe(move || {
+            let _ = retired.insert(1);
+        });
+
+        let owner = StateOwner4 {
+            clientid: 1,
+            owner: bytes::Bytes::from_static(b"lock-owner"),
+        };
+        let result = state
+            .create_lock_state(&open, &owner, object, NfsLockType4::ReadLt, 0, 1)
+            .await;
+        assert_eq!(
+            result.err(),
+            Some(NfsStat4::Stale),
+            "a lock must not be created for an object retired mid-call",
+        );
+        assert!(
+            state.inner.read().await.lock_files.is_empty(),
+            "no lock state may survive the retirement",
+        );
+    }
+
     /// And for a directory delegation.
     #[tokio::test]
     async fn a_retirement_inside_the_delegation_window_refuses_the_grant() {
