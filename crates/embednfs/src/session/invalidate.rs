@@ -59,6 +59,35 @@ impl StateManager {
         self.retired_objects.contains(&id)
     }
 
+    /// Fire the test probe, if one is installed. Compiled out otherwise.
+    ///
+    /// Placed at each point where a retirement could interleave with state
+    /// creation, so a test can complete the retirement there rather than racing
+    /// to hit a window a few instructions wide.
+    #[inline]
+    pub(crate) fn retire_probe(&self) {
+        #[cfg(test)]
+        {
+            let probe = self.retire_probe.lock().expect("probe mutex poisoned");
+            if let Some(f) = probe.as_ref() {
+                f();
+            }
+        }
+    }
+
+    /// Install the probe. Tests only.
+    #[cfg(test)]
+    pub(crate) fn set_retire_probe(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self.retire_probe.lock().expect("probe mutex poisoned") = Some(Box::new(f));
+    }
+
+    /// A handle on the retired set, so a probe can mark objects retired from
+    /// inside the window it is simulating.
+    #[cfg(test)]
+    pub(crate) fn retired_set(&self) -> std::sync::Arc<dashmap::DashSet<ObjectId>> {
+        std::sync::Arc::clone(&self.retired_objects)
+    }
+
     /// Record `ids` as retired, permanently, before anything is dropped.
     ///
     /// Separate from the sweep and ordered before it: the sweep answers for
@@ -160,6 +189,7 @@ mod tests {
         reason = "test scaffolding: a failed unwrap/panic is the test failing"
     )]
     use super::*;
+    use embednfs_proto::{NfsStat4, OPEN4_SHARE_ACCESS_READ};
 
     fn ids(v: &[ObjectId]) -> HashSet<ObjectId> {
         v.iter().copied().collect()
@@ -276,5 +306,103 @@ mod tests {
         // Once the sweep has run, the mapping is gone and minting is refused.
         let _ = state.invalidate_objects(&ids(&[1])).await;
         assert_eq!(state.object_to_fh(&ServerObject::Fs(1)), None);
+    }
+
+    // ── Check-then-act windows, driven deterministically ────────────────────
+    //
+    // Each test installs a probe that completes a retirement *at* the window,
+    // rather than racing to land in one a few instructions wide. A timing test
+    // does not reliably catch these — this crate's history is explicit that two
+    // earlier lost-wakeup injections survived a 2000-iteration loop.
+
+    /// A retirement landing between the check and the insert must not leave a
+    /// filehandle mapping behind.
+    ///
+    /// The sweep has already run by then, so a mapping published afterwards
+    /// would outlive it and keep resolving.
+    #[tokio::test]
+    async fn a_retirement_inside_the_mint_window_leaves_no_mapping() {
+        let state = StateManager::new();
+        let retired = state.retired_set();
+        state.set_retire_probe(move || {
+            // The retirement marks (and, in the real path, then sweeps) while
+            // the mint is between its check and its inserts.
+            let _ = retired.insert(1);
+        });
+
+        let object = ServerObject::Fs(1);
+        assert_eq!(
+            state.object_to_fh(&object),
+            None,
+            "a mint racing a retirement must not hand back a filehandle",
+        );
+        assert!(
+            !state.object_to_fh.contains_key(&object),
+            "and must not leave a mapping the sweep has already passed",
+        );
+        assert_eq!(state.fh_to_object.len(), 0, "no reverse mapping either");
+    }
+
+    /// The same window for OPEN state: a retirement completing between entry
+    /// and the write guard must still refuse the open.
+    #[tokio::test]
+    async fn a_retirement_inside_the_open_window_refuses_the_open() {
+        let state = StateManager::new();
+        let retired = state.retired_set();
+        state.set_retire_probe(move || {
+            let _ = retired.insert(1);
+        });
+
+        let result = state
+            .create_open_state(ServerObject::Fs(1), 1, OPEN4_SHARE_ACCESS_READ, 0)
+            .await;
+        assert_eq!(
+            result.err(),
+            Some(NfsStat4::Stale),
+            "an open must not be created for an object retired mid-call",
+        );
+        assert!(
+            state.inner.read().await.open_files.is_empty(),
+            "no open state may survive the retirement",
+        );
+    }
+
+    /// And for a directory delegation.
+    #[tokio::test]
+    async fn a_retirement_inside_the_delegation_window_refuses_the_grant() {
+        let state = StateManager::new();
+        let retired = state.retired_set();
+        state.set_retire_probe(move || {
+            let _ = retired.insert(1);
+        });
+
+        let result = state
+            .create_directory_delegation(ServerObject::Fs(1), 1, None)
+            .await;
+        assert_eq!(result.err(), Some(NfsStat4::Stale));
+        assert!(
+            state.inner.read().await.delegations.is_empty(),
+            "no delegation may survive the retirement",
+        );
+    }
+
+    /// An unretired object is unaffected by the probe being installed at all —
+    /// so the tests above are testing the retirement, not the plumbing.
+    #[tokio::test]
+    async fn the_probe_does_not_disturb_an_unretired_object() {
+        let state = StateManager::new();
+        let retired = state.retired_set();
+        state.set_retire_probe(move || {
+            let _ = retired.insert(1);
+        });
+
+        // Object 2 is never retired.
+        assert!(state.object_to_fh(&ServerObject::Fs(2)).is_some());
+        assert!(
+            state
+                .create_open_state(ServerObject::Fs(2), 1, OPEN4_SHARE_ACCESS_READ, 0)
+                .await
+                .is_ok(),
+        );
     }
 }

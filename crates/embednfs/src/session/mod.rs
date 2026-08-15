@@ -114,7 +114,16 @@ pub(crate) struct StateManager {
     /// an OPEN, a lock or a delegation afterwards. This set is what makes the
     /// retirement outlive the sweep — every creation path consults it, so a
     /// retired object can never acquire new server state.
-    retired_objects: DashSet<crate::internal::ObjectId>,
+    retired_objects: Arc<DashSet<crate::internal::ObjectId>>,
+    /// Test-only probe fired at the points where a retirement could interleave.
+    ///
+    /// The races these fixes close are check-then-act windows a few
+    /// instructions wide. A stress test does not reliably land in one, and this
+    /// module's history says so plainly: two earlier lost-wakeup injections
+    /// survived a 2000-iteration timing loop. The probe lets a test complete a
+    /// retirement *at* the window instead of racing to hit it.
+    #[cfg(test)]
+    retire_probe: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     next_fh: AtomicU64,
     /// Random per-boot prefix embedded in every opaque filehandle.
     ///
@@ -178,7 +187,9 @@ impl StateManager {
             })),
             fh_to_object: DashMap::new(),
             object_to_fh: DashMap::new(),
-            retired_objects: DashSet::new(),
+            retired_objects: Arc::new(DashSet::new()),
+            #[cfg(test)]
+            retire_probe: std::sync::Mutex::new(None),
             next_fh: AtomicU64::new(1),
             fh_boot_nonce: new_fh_boot_nonce(),
             next_clientid: AtomicU64::new(1),

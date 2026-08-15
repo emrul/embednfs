@@ -43,11 +43,11 @@ impl StateManager {
         share_access: u32,
         share_deny: u32,
     ) -> Result<Stateid4, NfsStat4> {
-        // A retired object may not acquire new state: the invalidation sweep
-        // already ran, so anything created now would survive it.
-        if self.is_retired(&object) {
-            return Err(NfsStat4::Stale);
-        }
+        // The retired check lives **inside** the write guard below, not here:
+        // the invalidation sweep takes that same guard, so checking outside it
+        // leaves a window where a retirement can mark and sweep between the
+        // check and the insert, and the new state outlives the sweep.
+        self.retire_probe();
 
         self.reap_expired_clients().await;
         // Store only the access mode. Want/signal hints (the 0xFF00 selector and
@@ -65,6 +65,13 @@ impl StateManager {
             return Err(NfsStat4::Inval);
         }
         let mut inner = self.inner.write().await;
+        // A retired object may not acquire new state. Checked under the guard
+        // the sweep also takes, so this and the insert cannot be split by a
+        // retirement.
+        if self.is_retired(&object) {
+            return Err(NfsStat4::Stale);
+        }
+
         for state in inner.open_files.values() {
             if !state.active {
                 continue;

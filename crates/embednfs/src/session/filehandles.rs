@@ -30,6 +30,7 @@ impl StateManager {
         if self.is_retired(object) {
             return None;
         }
+        self.retire_probe();
         let fh_num = self
             .next_fh
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -38,6 +39,20 @@ impl StateManager {
         fh.extend_from_slice(&fh_num.to_be_bytes());
         let _ = self.fh_to_object.insert(fh.clone(), object.clone());
         let _ = self.object_to_fh.insert(object.clone(), fh.clone());
+
+        // Register-then-validate. The check above is not enough on its own: a
+        // retirement can land between it and the inserts, and the sweep would
+        // already have run, so the new mapping would survive it.
+        //
+        // Re-reading *after* publishing closes that. Retirement marks before it
+        // sweeps, so either this mapping is visible to the sweep and removed by
+        // it, or the mark is visible here and the mapping is backed out. There
+        // is no interleaving in which a mapping outlives the retirement.
+        if self.is_retired(object) {
+            let _ = self.fh_to_object.remove(&fh);
+            let _ = self.object_to_fh.remove(object);
+            return None;
+        }
         Some(embednfs_proto::NfsFh4(fh.into()))
     }
 

@@ -27,14 +27,20 @@ impl StateManager {
         clientid: Clientid4,
         sessionid: Option<Sessionid4>,
     ) -> Result<Stateid4, NfsStat4> {
-        // A retired object may not acquire new state: the invalidation sweep
-        // already ran, so anything created now would survive it.
-        if self.is_retired(&object) {
-            return Err(NfsStat4::Stale);
-        }
+        // The retired check lives **inside** the write guard below, not here:
+        // the invalidation sweep takes that same guard, so checking outside it
+        // leaves a window where a retirement can mark and sweep between the
+        // check and the insert, and the new state outlives the sweep.
+        self.retire_probe();
 
         self.reap_expired_clients().await;
         let mut inner = self.inner.write().await;
+        // A retired object may not acquire new state. Checked under the guard
+        // the sweep also takes, so this and the insert cannot be split by a
+        // retirement.
+        if self.is_retired(&object) {
+            return Err(NfsStat4::Stale);
+        }
 
         if let Some(other) =
             Self::find_live_directory_delegation(&inner, &object, clientid).copied()
@@ -88,14 +94,20 @@ impl StateManager {
         max_per_client: usize,
         max_total: usize,
     ) -> Result<DirectoryDelegationGrant, NfsStat4> {
-        // A retired object may not acquire new state: the invalidation sweep
-        // already ran, so anything created now would survive it.
-        if self.is_retired(&object) {
-            return Err(NfsStat4::Stale);
-        }
+        // The retired check lives **inside** the write guard below, not here:
+        // the invalidation sweep takes that same guard, so checking outside it
+        // leaves a window where a retirement can mark and sweep between the
+        // check and the insert, and the new state outlives the sweep.
+        self.retire_probe();
 
         self.reap_expired_clients().await;
         let mut inner = self.inner.write().await;
+        // A retired object may not acquire new state. Checked under the guard
+        // the sweep also takes, so this and the insert cannot be split by a
+        // retirement.
+        if self.is_retired(&object) {
+            return Err(NfsStat4::Stale);
+        }
 
         if Self::find_live_directory_delegation(&inner, &object, clientid).is_some() {
             return Ok(DirectoryDelegationGrant::AlreadyHeld);
