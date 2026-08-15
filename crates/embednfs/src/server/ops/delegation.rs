@@ -475,8 +475,13 @@ where
 
         let counts = self.state.invalidate_objects(&ids).await;
 
+        // Read the count before the macro: awaiting inside the macro arguments
+        // holds a non-Send value across the await and makes the whole future
+        // non-Send.
+        let fences = self.retired.read().await.len();
         tracing::info!(
             objects = matched.len(),
+            fences,
             filehandles = counts.filehandles,
             opens = counts.opens,
             locks = counts.locks,
