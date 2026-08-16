@@ -71,12 +71,78 @@ mod retirement_fence {
         clippy::panic,
         reason = "test scaffolding: a failed unwrap/panic is the test failing"
     )]
+    use crate::internal::ServerObject;
     use crate::memfs::MemFs;
     use crate::server::NfsServer;
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     fn server() -> NfsServer<MemFs> {
         NfsServer::new(MemFs::new())
+    }
+
+    /// The write-delegation recall reports what is actually outstanding.
+    ///
+    /// Zero today, and the zero is *derived*: the recall queries live
+    /// delegation state and classifies each kind through
+    /// `DelegationKind::conveys_write`, an exhaustive match. A new kind will
+    /// not compile until someone classifies it — which is what keeps this test
+    /// from staying green if OPEN ever starts granting delegations.
+    ///
+    /// A directory delegation is the case that makes the query non-trivial: it
+    /// exists, it is in scope, and it still does not count, because it conveys
+    /// no authority over file bytes.
+    #[tokio::test]
+    async fn write_delegation_recall_reports_what_is_outstanding() {
+        let server = server();
+        let control = server.control_handle();
+
+        let object = server.register_handle(&1).await.expect("registration");
+        let _ = server.register_handle(&2).await.expect("registration");
+
+        // A live delegation over an in-scope object, of the only kind this
+        // server grants — so the query has something to classify rather than an
+        // empty map to walk past.
+        let scoped = ServerObject::Fs(object);
+        let _ = server
+            .state
+            .create_directory_delegation(scoped.clone(), 41, None)
+            .await
+            .expect("grant a directory delegation");
+        assert_eq!(
+            server
+                .state
+                .write_delegations_over(&HashSet::from([scoped]))
+                .await
+                .len(),
+            0,
+            "a directory delegation conveys no write authority over file bytes",
+        );
+
+        // So the recall reports zero — having looked, not having assumed.
+        assert_eq!(
+            control
+                .recall_write_delegations(|h: &u64| *h == 1)
+                .await
+                .expect("recall"),
+            0,
+        );
+        assert_eq!(
+            control
+                .recall_write_delegations(|_: &u64| true)
+                .await
+                .expect("recall"),
+            0,
+            "even a scope covering the whole export",
+        );
+        assert_eq!(
+            control
+                .recall_write_delegations(|h: &u64| *h == 99)
+                .await
+                .expect("recall"),
+            0,
+            "an empty scope short-circuits",
+        );
     }
 
     /// Retirement is a fence, not just a snapshot: a handle that was retired

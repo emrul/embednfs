@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use embednfs_proto::{
@@ -275,6 +276,37 @@ impl StateManager {
         }
 
         recalls
+    }
+
+    /// Every outstanding delegation over `objects` that conveys write
+    /// authority over file contents.
+    ///
+    /// The query behind `NfsServerControl::recall_write_delegations`. It walks
+    /// live delegation state rather than reasoning about what this server
+    /// happens to grant, so the answer stays correct as that changes — see
+    /// [`DelegationKind::conveys_write`], which will not compile past a new
+    /// kind until someone classifies it.
+    pub(crate) async fn write_delegations_over(
+        &self,
+        objects: &HashSet<ServerObject>,
+    ) -> Vec<Stateid4> {
+        let inner = self.inner.read().await;
+        inner
+            .delegations
+            .iter()
+            .filter(|(_, state)| {
+                state.kind.conveys_write()
+                    && objects.contains(&state.object)
+                    && matches!(
+                        state.status,
+                        DelegationStatus::Granted | DelegationStatus::RecallInProgress
+                    )
+            })
+            .map(|(other, state)| Stateid4 {
+                seqid: state.stateid_seq,
+                other: *other,
+            })
+            .collect()
     }
 
     /// Return whether a recalled delegation is no longer outstanding.

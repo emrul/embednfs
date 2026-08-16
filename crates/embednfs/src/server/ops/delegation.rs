@@ -145,6 +145,59 @@ impl<H> NfsServerControl<H>
 where
     H: Clone + Eq + Hash + Send + Sync + 'static,
 {
+    /// Recalls every **write** delegation the server has granted for objects
+    /// matching `scope`, and reports how many it recalled.
+    ///
+    /// For a backend narrowing an export from writable to read-only. Such a
+    /// backend has to know that no client still believes it may write, and it
+    /// must not have to reason about what this server does or does not grant to
+    /// find out — that is a server policy, and a backend guessing at it is a
+    /// backend that will be wrong the day the policy changes.
+    ///
+    /// The answer is a **query over live delegation state**, not a statement
+    /// about what this server happens to grant. Today it is always zero,
+    /// because the only kind this server grants is a directory delegation and
+    /// that conveys no authority over file bytes — but nothing here assumes
+    /// that. `DelegationKind::conveys_write` decides, and it is an exhaustive
+    /// match: a new kind will not compile until someone classifies it and, for
+    /// a `true`, adds the recall path to go with it.
+    ///
+    /// So `Ok(0)` means "no client holds write authority under this scope",
+    /// verified — not "this server does not do that", assumed.
+    ///
+    /// Deadlines are the **caller's**. This operation does not impose one:
+    /// narrowing an export is the caller's transition, bounded by the caller's
+    /// budget, and a server-side timeout here would silently substitute a
+    /// different one.
+    pub async fn recall_write_delegations<P>(&self, scope: P) -> FsResult<usize>
+    where
+        P: Fn(&H) -> bool + Send + Sync + 'static,
+    {
+        let scoped: HashSet<ServerObject> = {
+            let map = self.handle_to_object.read().await;
+            map.iter()
+                .filter(|(handle, _)| scope(handle))
+                .map(|(_, object)| ServerObject::Fs(*object))
+                .collect()
+        };
+        if scoped.is_empty() {
+            return Ok(0);
+        }
+        let outstanding = self.state.write_delegations_over(&scoped).await;
+        if outstanding.is_empty() {
+            return Ok(0);
+        }
+        // Unreachable while no kind conveys write authority. Writing the recall
+        // for a delegation that cannot exist would be speculative, so the
+        // contract is enforced at the type level instead: whoever adds such a
+        // kind has to come through `conveys_write`, and finds this waiting.
+        tracing::error!(
+            outstanding = outstanding.len(),
+            "write delegations are outstanding but no recall path exists for them"
+        );
+        Err(FsError::Unsupported)
+    }
+
     /// Recalls directory delegations for an exported backend directory handle.
     ///
     /// Unknown handles are treated as a no-op because no NFS client can hold
