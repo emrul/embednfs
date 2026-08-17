@@ -97,6 +97,26 @@ pub(super) enum DelegationKind {
     DirectoryRead,
 }
 
+impl DelegationKind {
+    /// Whether this delegation lets a client believe it may write file
+    /// contents without going back to the server.
+    ///
+    /// Deliberately an exhaustive match with no wildcard. A backend narrowing
+    /// an export to read-only asks the server whether any such delegation is
+    /// outstanding, and the honest answer depends on every kind this server can
+    /// grant. Adding a kind must not silently inherit `false` — it must fail to
+    /// compile here until someone decides, and adds the recall path that goes
+    /// with a `true`.
+    pub(super) fn conveys_write(self) -> bool {
+        match self {
+            // A directory delegation caches directory contents. It conveys no
+            // authority over file bytes, so narrowing file writes does not
+            // require recalling it.
+            DelegationKind::DirectoryRead => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DelegationStatus {
     Granted,
