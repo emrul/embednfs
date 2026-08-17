@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/embednfs)](https://crates.io/crates/embednfs)
 
-An embeddable NFSv4 server library in Rust. You implement a small filesystem trait; the library handles the wire protocol, sessions, filehandles, locking, and TCP serving over both NFSv4.0 (RFC 7530) and NFSv4.1 (RFC 8881) — the same server speaks both minor versions and lets the client pick.
+An embeddable NFSv4 server library in Rust. You implement a small filesystem trait; the library handles the wire protocol, sessions, filehandles, locking, and TCP serving over NFSv4.0 (RFC 7530), NFSv4.1 (RFC 8881), and the NFSv4.2 xattr ops (RFC 8276) — the same server speaks minor versions 0, 1, and 2 and lets the client pick.
 
 The primary implementation target is Apple/macOS client compatibility for a localhost FUSE-replacement use case. The macOS in-kernel `mount_nfs(8)` does not advertise minor version 1, so embednfs serves NFSv4.0 on that path; Linux is served via NFSv4.1 for sessions and opt-in read-only directory delegations, with the RFC 8276 xattr ops exposed on the NFSv4.2 path.
 
@@ -11,7 +11,7 @@ The primary implementation target is Apple/macOS client compatibility for a loca
 This project currently makes two important non-promises:
 
 - It does **not** guarantee correct or robust behavior over a real network. The target deployment is localhost. Running it over non-localhost transport may work in some cases, but that is not a supported or validated use case.
-- It targets macOS first (NFSv4.0 path) and the Linux in-kernel client (NFSv4.1 path) for xattr and directory-delegation workflows. Other clients may work, but they are not a compatibility target.
+- It targets macOS first (NFSv4.0 path) and the Linux in-kernel client (NFSv4.1 path for sessions and directory delegations, NFSv4.2 path for xattrs). Other clients may work, but they are not a compatibility target.
 
 In short: the supported target is **macOS / Linux over localhost**.
 
@@ -88,6 +88,43 @@ state after external unlink or rename. See
 [`docs/linux-client-compatibility.md`](docs/linux-client-compatibility.md) for
 validated kernel behavior and harness controls.
 
+## Server Lifecycle Control
+
+`NfsServer::control_handle()` returns an `NfsServerControl` the embedder keeps
+before moving the server into `listen`/`serve`. It is the ownership boundary
+for runtime lifecycle operations on a running server:
+
+- **`retire_handles(pred)`** retires every backend object whose handle
+  satisfies the predicate, dropping filehandle mappings, OPEN and lock state,
+  delegations, and synthetic metadata. Retirement is **permanent and
+  idempotent**: the predicate is kept as a standing fence, so a handle matching
+  it can never be re-registered — a client racing the withdrawal sees
+  `NFS4ERR_STALE`, not a fresh mapping. Because fences are never removed, scope
+  the predicate to a generation rather than to individual objects if you retire
+  repeatedly. Directory delegations are recalled first, best-effort; retirement
+  never blocks on a client answering.
+- **`recall_write_delegations(scope)`** recalls every write delegation held
+  for objects matching the scope and reports how many. The answer is a query
+  over live delegation state, not an assumption about server policy: `Ok(0)`
+  means no scoped client holds write authority, verified. Deadlines belong to
+  the caller. Use it before narrowing an export from writable to read-only.
+- **`recall_directory(handle)`** recalls directory delegations before an
+  external namespace mutation (see the directory-delegations section above).
+
+Filehandles are boot-scoped: each server start mints a random boot nonce that
+prefixes every filehandle, so a handle from a previous boot is unrepresentable
+in the current one and fails with `NFS4ERR_STALE` instead of silently resolving
+to an unrelated object.
+
+```rust
+let server = NfsServer::new(fs);
+let control = server.control_handle();
+tokio::spawn(async move { server.listen("127.0.0.1:2049").await });
+
+// Later: permanently withdraw a retired generation.
+let counts = control.retire_handles(|h| backend.is_retired(h)).await;
+```
+
 ## NFSv4.1 Server Identity
 
 NFSv4.1 clients use the `EXCHANGE_ID` `server_owner` and `server_scope` fields
@@ -134,6 +171,10 @@ meaningfully authenticated; a malformed AUTH_SYS credential still fails with
 `AuthContext::Sys` from `AuthContext::None`, so a backend can additionally treat
 a missing AUTH_SYS identity as unprivileged.
 
+The builder's `.id_mapper(...)` controls how numeric AUTH_SYS uids/gids are
+rendered as NFSv4 `owner`/`owner_group` strings; the default `NumericIdMapper`
+renders the numeric ids directly, which is what the localhost use case wants.
+
 ## Filesystem API
 
 The filesystem API is handle-based and models the exported filesystem rather than the raw backing store. Weak backends such as exFAT- or S3-style adapters are expected to provide stable handles, exported attrs, and any overlay metadata they need behind the trait.
@@ -146,6 +187,7 @@ use bytes::Bytes;
 use embednfs::{
     AccessMask, Attrs, CreateRequest, CreateResult, DirPage, FileSystem, FsCapabilities,
     FsLimits, FsResult, FsStats, ReadResult, RequestContext, SetAttrs, WriteResult,
+    WriteStability,
 };
 
 #[async_trait]
@@ -153,8 +195,14 @@ pub trait FileSystem: Send + Sync + 'static {
     type Handle: Clone + Eq + std::hash::Hash + Send + Sync + 'static;
 
     fn root(&self) -> Self::Handle;
-    fn capabilities(&self) -> FsCapabilities;
-    fn limits(&self) -> FsLimits;
+
+    // Provided methods — override to advertise non-default capabilities/limits.
+    fn capabilities(&self) -> FsCapabilities {
+        FsCapabilities::default()
+    }
+    fn limits(&self) -> FsLimits {
+        FsLimits::default()
+    }
 
     async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats>;
     async fn getattr(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<Attrs>;
@@ -196,6 +244,7 @@ pub trait FileSystem: Send + Sync + 'static {
         handle: &Self::Handle,
         offset: u64,
         data: Bytes,
+        requested: WriteStability,
     ) -> FsResult<WriteResult>;
     async fn create(
         &self,
@@ -233,15 +282,17 @@ Key points:
 - `Attrs` carries the exported metadata view. The stable NFS identity is the `(fsid, fileid)` pair; `fileid` only needs to be unique within its `fsid`.
 - `RequestContext` is passed to every op so adapters can make explicit policy decisions.
 - `readdir()` is paged and cookie-driven, with optional inline attrs for `READDIR` hot paths.
+- `FsError::Delay` maps exactly to `NFS4ERR_DELAY`: a transient refusal where the current filehandle stays valid and the client is expected to retry. Use it for a backend whose admission is temporarily paused; when an operation has actually failed, `FsError::Io` or another specific error is the honest answer.
 
 ### Extension Traits
 
 The server will use these when present:
 
-- `Xattrs` for macOS named attributes / xattrs / named streams
+- `Xattrs` for macOS named attributes / xattrs / named streams, and the Linux NFSv4.2 xattr ops
 - `Symlinks` for `CREATE symlink` and `READLINK`
 - `HardLinks` for `LINK`
 - `CommitSupport` for explicit `COMMIT`
+- `OpenLifecycle` for OPEN/CLOSE lifecycle notifications (each open reports write access; each close reports whether it was the last writer)
 
 If an extension trait is absent, the server returns the appropriate NFS unsupported/type errors and does not advertise the feature where that matters.
 
@@ -266,6 +317,11 @@ Supported through extensions:
 - `READLINK`
 - `LINK`
 - macOS named-attribute and xattr flows behind `OPENATTR`
+
+Linux xattr ops on the NFSv4.2 path (RFC 8276), served through the `Xattrs`
+extension trait:
+
+- `GETXATTR`, `SETXATTR`, `LISTXATTRS`, `REMOVEXATTR`
 
 Opt-in Linux NFSv4.1 directory-delegation support:
 
@@ -305,6 +361,7 @@ bash scripts/ensure-nfs4j-client.sh
 cargo test -p embednfs --test nfs4j_smoke -- --ignored --nocapture
 cargo test -p embednfs --test nfs4j_stress -- --ignored --nocapture
 ./scripts/smoke-macos-nfs41.sh
+./scripts/smoke-linux-nfs41.sh
 ```
 
 The integration suite exercises the full RPC path over TCP and includes raw `OPENATTR`/named-attribute flows for macOS-style clients.
@@ -313,7 +370,7 @@ The integration suite exercises the full RPC path over TCP and includes raw `OPE
 
 The ignored `nfs4j` smoke and stress tests use the pinned harness from `https://github.com/PeronGH/nfs4j.git` at commit `9d433b98bf56ea6d5cf791388c9d75ad32d5d0f2`. `scripts/ensure-nfs4j-client.sh` clones or reuses `/tmp/nfs4j`, checks out that exact ref, builds `basic-client`, and prints the resulting `jar-with-dependencies` path.
 
-For a genuine localhost/macOS smoke test, `scripts/smoke-macos-nfs41.sh` starts `embednfsd`, mounts it with `mount_nfs` using NFSv4.0, and exercises basic create/write/read/rename/remove/rmdir behavior through the kernel client.
+For a genuine localhost/macOS smoke test, `scripts/smoke-macos-nfs41.sh` starts `embednfsd`, mounts it with `mount_nfs` using NFSv4.0, and exercises basic create/write/read/rename/remove/rmdir behavior through the kernel client. `scripts/smoke-linux-nfs41.sh` is the Linux-client counterpart, covering the NFSv4.1 session path and the directory-delegation gate (`REQUIRE_DELEGATIONS=1`).
 
 Many of the protocol conformance tests are adapted from the maintained `pynfs` tree at `git://git.linux-nfs.org/projects/cdmackay/pynfs.git`.
 
