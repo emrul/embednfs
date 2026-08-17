@@ -1,6 +1,6 @@
 [package]
 name = "embednfs"
-version = "0.4.1"
+version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -22,7 +22,7 @@ dashmap = "6.1.0"
 # a stepped clock or a VM restored from snapshot can repeat it, which would
 # reintroduce cross-boot filehandle reuse.
 getrandom = "0.3"
-embednfs-proto = { path = "../embednfs-proto", version = "0.4.1" }
+embednfs-proto = { path = "../embednfs-proto", version = "0.5.0" }
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["full"] }
 tracing = "0.1.44"
