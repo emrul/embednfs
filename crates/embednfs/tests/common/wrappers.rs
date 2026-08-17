@@ -37,6 +37,14 @@ pub struct ForcedWriteStabilityFs {
     pub stability: WriteStability,
 }
 
+/// Returns `FsError::Delay` from LOOKUP of one specific name, delegating
+/// everything else to the inner filesystem. Models a backend whose admission
+/// gate is temporarily paused while its handles remain valid.
+pub struct DelayedLookupFs {
+    pub inner: MemFs,
+    pub delayed_name: &'static str,
+}
+
 #[derive(Default)]
 pub struct OpenLifecycleCounts {
     pub write_open_count: AtomicUsize,
@@ -831,5 +839,120 @@ impl OpenLifecycle<u64> for OpenLifecycleFs {
         };
         let _ = counter.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl FileSystem for DelayedLookupFs {
+    type Handle = u64;
+
+    fn root(&self) -> Self::Handle {
+        self.inner.root()
+    }
+    fn capabilities(&self) -> embednfs::FsCapabilities {
+        self.inner.capabilities()
+    }
+    fn limits(&self) -> embednfs::FsLimits {
+        self.inner.limits()
+    }
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
+        self.inner.statfs(ctx, handle).await
+    }
+    async fn getattr(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<Attrs> {
+        self.inner.getattr(ctx, handle).await
+    }
+    async fn access(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        requested: AccessMask,
+    ) -> FsResult<AccessMask> {
+        self.inner.access(ctx, handle, requested).await
+    }
+    async fn lookup(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+    ) -> FsResult<Self::Handle> {
+        if name == self.delayed_name {
+            return Err(FsError::Delay);
+        }
+        self.inner.lookup(ctx, parent, name).await
+    }
+    async fn parent(
+        &self,
+        ctx: &RequestContext,
+        dir: &Self::Handle,
+    ) -> FsResult<Option<Self::Handle>> {
+        self.inner.parent(ctx, dir).await
+    }
+    async fn readdir(
+        &self,
+        ctx: &RequestContext,
+        dir: &Self::Handle,
+        cookie: u64,
+        max_entries: u32,
+        with_attrs: bool,
+    ) -> FsResult<DirPage<Self::Handle>> {
+        self.inner
+            .readdir(ctx, dir, cookie, max_entries, with_attrs)
+            .await
+    }
+    async fn read(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        offset: u64,
+        count: u32,
+    ) -> FsResult<ReadResult> {
+        self.inner.read(ctx, handle, offset, count).await
+    }
+    async fn write(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        offset: u64,
+        data: Bytes,
+        requested: WriteStability,
+    ) -> FsResult<WriteResult> {
+        self.inner.write(ctx, handle, offset, data, requested).await
+    }
+    async fn create(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+        req: CreateRequest,
+    ) -> FsResult<CreateResult<Self::Handle>> {
+        self.inner.create(ctx, parent, name, req).await
+    }
+    async fn remove(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+    ) -> FsResult<()> {
+        self.inner.remove(ctx, parent, name).await
+    }
+    async fn rename(
+        &self,
+        ctx: &RequestContext,
+        from_dir: &Self::Handle,
+        from_name: &str,
+        to_dir: &Self::Handle,
+        to_name: &str,
+    ) -> FsResult<()> {
+        self.inner
+            .rename(ctx, from_dir, from_name, to_dir, to_name)
+            .await
+    }
+    async fn setattr(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        attrs: &SetAttrs,
+    ) -> FsResult<Attrs> {
+        self.inner.setattr(ctx, handle, attrs).await
     }
 }

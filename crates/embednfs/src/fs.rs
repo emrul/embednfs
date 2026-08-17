@@ -68,6 +68,16 @@ pub enum FsError {
     /// The backend encountered an unrecoverable server-side fault.
     #[error("server fault")]
     ServerFault,
+    /// The operation cannot proceed right now, but the refusal is transient:
+    /// the current filehandle remains valid and the NFS client is expected to
+    /// retry the same operation after a short delay.
+    ///
+    /// Maps exactly to `NFS4ERR_DELAY`. This is not a generic "busy" result —
+    /// it tells the client nothing failed and nothing became stale. When an
+    /// operation has actually failed, return [`FsError::Io`] or another
+    /// specific error instead.
+    #[error("transient delay, retry")]
+    Delay,
 }
 
 impl FsError {
@@ -94,6 +104,7 @@ impl FsError {
             FsError::Unsupported => NfsStat4::Notsupp,
             FsError::BadHandle => NfsStat4::Badhandle,
             FsError::ServerFault => NfsStat4::Serverfault,
+            FsError::Delay => NfsStat4::Delay,
         }
     }
 }
@@ -781,5 +792,20 @@ pub trait FileSystem: Send + Sync + 'static {
     /// Returns optional OPEN/CLOSE lifecycle notifications.
     fn open_lifecycle(&self) -> Option<&dyn OpenLifecycle<Self::Handle>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use embednfs_proto::NfsStat4;
+
+    use super::FsError;
+
+    /// `FsError::Delay` maps exactly to `NFS4ERR_DELAY`.
+    /// Origin: `design/external_requests/portal-sync-lifecycle-cutover.md` acceptance criteria.
+    /// RFC: RFC 8881 §15.1.1.3.
+    #[test]
+    fn delay_maps_exactly_to_nfs4err_delay() {
+        assert_eq!(FsError::Delay.to_nfsstat4(), NfsStat4::Delay);
     }
 }
