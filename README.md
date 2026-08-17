@@ -1,6 +1,13 @@
 # embednfs
 
-[![crates.io](https://img.shields.io/crates/v/embednfs)](https://crates.io/crates/embednfs)
+[![release](https://img.shields.io/github/v/tag/emrul/embednfs?label=release)](https://github.com/emrul/embednfs/tags)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+> This is [Emrul Islam](https://github.com/emrul)'s maintained fork of
+> [embednfs](https://github.com/PeronGH/embednfs), created by
+> [Peron (PeronGH)](https://github.com/PeronGH). See
+> [Attribution](#attribution) for details. Releases are tagged here on
+> GitHub; the `embednfs` crate on crates.io is the original author's.
 
 An embeddable NFSv4 server library in Rust. You implement a small filesystem trait; the library handles the wire protocol, sessions, filehandles, locking, and TCP serving over NFSv4.0 (RFC 7530), NFSv4.1 (RFC 8881), and the NFSv4.2 xattr ops (RFC 8276) — the same server speaks minor versions 0, 1, and 2 and lets the client pick.
 
@@ -374,6 +381,21 @@ For a genuine localhost/macOS smoke test, `scripts/smoke-macos-nfs41.sh` starts 
 
 Many of the protocol conformance tests are adapted from the maintained `pynfs` tree at `git://git.linux-nfs.org/projects/cdmackay/pynfs.git`.
 
+## Attribution
+
+embednfs was created by [Peron (PeronGH)](https://github.com/PeronGH); the
+original project lives at
+[PeronGH/embednfs](https://github.com/PeronGH/embednfs) and is published on
+crates.io as `embednfs`, `embednfs-proto`, and `embednfsd`. This fork builds on
+that work — the protocol core, filesystem traits, and macOS/Linux client
+compatibility are Peron's design — and extends it with, among other things,
+runtime server lifecycle control (permanent handle retirement, truthful
+write-delegation recall, boot-scoped filehandles) and the `FsError::Delay`
+backend contract.
+
+The MIT license and the original copyright notice are preserved unchanged in
+[LICENSE](LICENSE).
+
 ## License
 
-MIT
+MIT — Copyright (c) 2026 Peron. See [LICENSE](LICENSE).
