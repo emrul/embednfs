@@ -1,6 +1,6 @@
 use crate::internal::ServerObject;
 
-use super::{FH_LEN, FH_NONCE_LEN, StateManager};
+use super::{FH_LEN, FH_NONCE_LEN, PERSISTENT_FH_TAG, StateManager};
 
 impl StateManager {
     pub(crate) fn alloc_connection_id(&self) -> u64 {
@@ -8,12 +8,37 @@ impl StateManager {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The opaque filehandle for `object`, minting one on first use.
+    /// Record the backend's durable encoding for `id`, so minting uses it.
     ///
-    /// Layout is `[boot nonce | counter]`, big-endian counter. The nonce makes
-    /// the bytes unique to this server boot, so a handle from a previous boot
-    /// can never be mistaken for one of ours — see `fh_boot_nonce`.
+    /// Called when the server first registers a backend handle. The bytes are
+    /// the backend's, without the server's tag.
+    pub(crate) fn record_persistent_fh(&self, id: crate::internal::ObjectId, encoded: Vec<u8>) {
+        let mut fh = Vec::with_capacity(encoded.len() + 1);
+        fh.push(PERSISTENT_FH_TAG);
+        fh.extend_from_slice(&encoded);
+        let _ = self.persistent_fh.insert(id, fh);
+    }
+
+    /// Whether `fh` has the persistent layout, and its backend encoding if so.
+    pub(crate) fn persistent_fh_body(fh: &embednfs_proto::NfsFh4) -> Option<&[u8]> {
+        match fh.0.as_ref() {
+            [PERSISTENT_FH_TAG, body @ ..]
+                if !body.is_empty() && body.len() <= crate::fs::MAX_PERSISTENT_HANDLE_LEN =>
+            {
+                Some(body)
+            }
+            _ => None,
+        }
+    }
+
     /// Mint (or reuse) the opaque filehandle for `object`.
+    ///
+    /// Two layouts. An object whose backend supplied a durable encoding gets
+    /// `[PERSISTENT_FH_TAG | encoding]`, which resolves again after a restart
+    /// through the backend's decoder. Anything else gets `[boot nonce |
+    /// counter]`, big-endian counter: the nonce makes the bytes unique to this
+    /// server boot, so a handle from a previous boot can never be mistaken for
+    /// one of ours — see `fh_boot_nonce`.
     ///
     /// Retirement blocks **minting**, not naming.
     ///
@@ -31,14 +56,33 @@ impl StateManager {
             return None;
         }
         self.retire_probe();
-        let fh_num = self
-            .next_fh
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut fh = Vec::with_capacity(FH_LEN);
-        fh.extend_from_slice(&self.fh_boot_nonce);
-        fh.extend_from_slice(&fh_num.to_be_bytes());
-        let _ = self.fh_to_object.insert(fh.clone(), object.clone());
-        let _ = self.object_to_fh.insert(object.clone(), fh.clone());
+        let fh = match self.claim_persistent_fh(object) {
+            Some(fh) => fh,
+            None => {
+                let fh_num = self
+                    .next_fh
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut fh = Vec::with_capacity(FH_LEN);
+                fh.extend_from_slice(&self.fh_boot_nonce);
+                fh.extend_from_slice(&fh_num.to_be_bytes());
+                let _ = self.fh_to_object.insert(fh.clone(), object.clone());
+                fh
+            }
+        };
+        // A concurrent mint for the same object may have won; keep one handle
+        // per object so the client never sees two names for one file.
+        match self.object_to_fh.entry(object.clone()) {
+            dashmap::Entry::Occupied(winner) => {
+                let winner = winner.get().clone();
+                if winner != fh {
+                    let _ = self.fh_to_object.remove_if(&fh, |_, o| o == object);
+                }
+                return Some(embednfs_proto::NfsFh4(winner.into()));
+            }
+            dashmap::Entry::Vacant(slot) => {
+                let _ = slot.insert(fh.clone());
+            }
+        }
 
         // Register-then-validate. The check above is not enough on its own: a
         // retirement can land between it and the inserts, and the sweep would
@@ -56,7 +100,38 @@ impl StateManager {
         Some(embednfs_proto::NfsFh4(fh.into()))
     }
 
+    /// The persistent handle for `object`, reserved in `fh_to_object`, if the
+    /// backend gave it one.
+    ///
+    /// Refuses (and the object falls back to a boot-scoped handle) if the
+    /// bytes already name a *different* object: a backend encoding that is
+    /// not injective must not let one filehandle mean two files.
+    fn claim_persistent_fh(&self, object: &ServerObject) -> Option<Vec<u8>> {
+        let ServerObject::Fs(id) = object else {
+            return None;
+        };
+        let fh = self.persistent_fh.get(id)?.value().clone();
+        match self.fh_to_object.entry(fh.clone()) {
+            dashmap::Entry::Occupied(existing) if existing.get() != object => {
+                tracing::warn!(
+                    object = ?object,
+                    holder = ?existing.get(),
+                    "backend persistent handle encoding collided; using a boot-scoped handle",
+                );
+                None
+            }
+            dashmap::Entry::Occupied(_) => Some(fh),
+            dashmap::Entry::Vacant(slot) => {
+                let _ = slot.insert(object.clone());
+                Some(fh)
+            }
+        }
+    }
+
     /// Resolve an opaque filehandle, rejecting anything not minted by this boot.
+    ///
+    /// A persistent handle this boot has not seen yet is a miss here; the
+    /// server then asks the backend to decode it (`NfsServer::resolve_object`).
     ///
     /// The nonce check runs **before** the map lookup, so a stale handle is
     /// rejected on its own merits rather than by happening to miss the table.
@@ -65,7 +140,9 @@ impl StateManager {
     /// to reach it.
     pub(crate) fn fh_to_object(&self, fh: &embednfs_proto::NfsFh4) -> Option<ServerObject> {
         let bytes = fh.0.as_ref();
-        if bytes.len() != FH_LEN || bytes.get(..FH_NONCE_LEN)? != self.fh_boot_nonce {
+        if Self::persistent_fh_body(fh).is_none()
+            && (bytes.len() != FH_LEN || bytes.get(..FH_NONCE_LEN)? != self.fh_boot_nonce)
+        {
             return None;
         }
         self.fh_to_object.get(bytes).map(|r| r.value().clone())

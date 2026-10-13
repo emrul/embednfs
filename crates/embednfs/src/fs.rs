@@ -661,6 +661,50 @@ pub trait OpenLifecycle<H>: Send + Sync {
     async fn on_close(&self, ctx: &RequestContext, handle: &H, last_writer: bool) -> FsResult<()>;
 }
 
+/// Longest backend encoding [`PersistentHandles::encode_handle`] may return.
+///
+/// NFSv4 caps a filehandle at 128 bytes (`NFS4_FHSIZE`) and the server spends
+/// one of them on its own tag. An encoding longer than this is treated as
+/// absent and the object gets a boot-scoped handle instead.
+pub const MAX_PERSISTENT_HANDLE_LEN: usize = 127;
+
+/// Optional filehandles that survive a server restart.
+///
+/// Without this, every filehandle is scoped to one server boot: a restart
+/// makes all of them `NFS4ERR_STALE`, including the mount's root, so a
+/// client has to remount and every open file and working directory under the
+/// mount is lost. A backend that can name its objects by durable identities
+/// implements this, and the server then mints filehandles that keep resolving
+/// across restarts for as long as the object exists — which is what lets a
+/// client ride out a restart through ordinary NFSv4.1 state recovery.
+///
+/// The server consults the codec only for objects it does not already know
+/// this boot; everything else stays an in-memory lookup.
+#[async_trait]
+pub trait PersistentHandles<H>: Send + Sync {
+    /// The durable bytes naming `handle`, or `None` to give it a boot-scoped
+    /// handle instead.
+    ///
+    /// Must be **canonical**: one object always encodes to the same bytes, and
+    /// [`Self::decode_handle`] of them yields an equal handle. Must be cheap:
+    /// it runs whenever the server first meets an object, without I/O.
+    fn encode_handle(&self, handle: &H) -> Option<Vec<u8>>;
+
+    /// The handle named by bytes a previous [`Self::encode_handle`] returned,
+    /// possibly in an earlier boot.
+    ///
+    /// The backend is the authority on whether the object still exists *and*
+    /// is still the object those bytes named; bytes that cannot be proved to
+    /// name a live object must fail, never resolve to a different one.
+    ///
+    /// - [`FsError::Stale`]: the object is gone, or the bytes are not a handle
+    ///   this backend would mint. The client sees `NFS4ERR_STALE`.
+    /// - [`FsError::Delay`]: the object may exist but cannot be resolved yet
+    ///   (for example, its storage is still being opened after a restart).
+    ///   The client sees `NFS4ERR_DELAY` and retries.
+    async fn decode_handle(&self, bytes: &[u8]) -> FsResult<H>;
+}
+
 /// Core filesystem trait implemented by embedders.
 #[async_trait]
 pub trait FileSystem: Send + Sync + 'static {
@@ -791,6 +835,11 @@ pub trait FileSystem: Send + Sync + 'static {
 
     /// Returns optional OPEN/CLOSE lifecycle notifications.
     fn open_lifecycle(&self) -> Option<&dyn OpenLifecycle<Self::Handle>> {
+        None
+    }
+
+    /// Returns optional restart-surviving filehandles.
+    fn persistent_handles(&self) -> Option<&dyn PersistentHandles<Self::Handle>> {
         None
     }
 }

@@ -126,6 +126,9 @@ impl StateManager {
             let _ = self.object_to_fh.remove(&object);
             counts.filehandles += 1;
         }
+        for id in ids {
+            let _ = self.persistent_fh.remove(id);
+        }
 
         let mut inner = self.inner.write().await;
 

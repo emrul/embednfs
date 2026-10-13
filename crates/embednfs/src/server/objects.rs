@@ -41,6 +41,16 @@ impl<F: FileSystem> NfsServer<F> {
             .write()
             .await
             .insert(id, handle.clone());
+        // Before the id escapes, so the first filehandle minted for it is
+        // already the persistent one.
+        if let Some(encoded) = self
+            .fs
+            .persistent_handles()
+            .and_then(|codec| codec.encode_handle(handle))
+            .filter(|e| !e.is_empty() && e.len() <= crate::fs::MAX_PERSISTENT_HANDLE_LEN)
+        {
+            self.state.record_persistent_fh(id, encoded);
+        }
         Ok(id)
     }
 
@@ -61,17 +71,44 @@ impl<F: FileSystem> NfsServer<F> {
             .ok_or(FsError::BadHandle)
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "kept async to match the surrounding server helper call pattern"
-    )]
     pub(super) async fn resolve_object(
         &self,
         fh: &Option<NfsFh4>,
     ) -> Result<(NfsFh4, ServerObject), NfsStat4> {
         let fh = fh.clone().ok_or(NfsStat4::Nofilehandle)?;
-        let object = self.state.fh_to_object(&fh).ok_or(NfsStat4::Stale)?;
+        if let Some(object) = self.state.fh_to_object(&fh) {
+            return Ok((fh, object));
+        }
+        let object = self.decode_persistent_fh(&fh).await?;
         Ok((fh, object))
+    }
+
+    /// Resolve a persistent filehandle this boot has not seen, through the
+    /// backend's decoder.
+    ///
+    /// The decoded handle goes through the same registration as any other, so
+    /// a retirement fence still refuses it, and the handle is re-minted rather
+    /// than trusted: the bytes the client sent must be exactly the bytes this
+    /// server would mint for the object now, or they are stale.
+    async fn decode_persistent_fh(&self, fh: &NfsFh4) -> Result<ServerObject, NfsStat4> {
+        let body = crate::session::StateManager::persistent_fh_body(fh).ok_or(NfsStat4::Stale)?;
+        let codec = self.fs.persistent_handles().ok_or(NfsStat4::Stale)?;
+        let handle = codec.decode_handle(body).await.map_err(|e| match e {
+            FsError::Delay => NfsStat4::Delay,
+            FsError::Stale | FsError::NotFound | FsError::BadHandle | FsError::InvalidInput => {
+                NfsStat4::Stale
+            }
+            other => other.to_nfsstat4(),
+        })?;
+        let object = ServerObject::Fs(
+            self.register_handle(&handle)
+                .await
+                .map_err(|e| e.to_nfsstat4())?,
+        );
+        match self.state.object_to_fh(&object) {
+            Some(minted) if minted == *fh => Ok(object),
+            _ => Err(NfsStat4::Stale),
+        }
     }
 
     pub(super) async fn parent_change_after_xattr_mutation(

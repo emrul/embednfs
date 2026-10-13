@@ -16,8 +16,9 @@ pub use embednfs_proto::AuthFlavor;
 pub use fs::{
     AccessMask, Attrs, AuthContext, CommitSupport, CreateKind, CreateRequest, CreateResult,
     DirEntry, DirPage, FileSystem, FsCapabilities, FsError, FsId, FsLimits, FsResult, FsStats,
-    HardLinks, ObjectType, OpenLifecycle, ReadResult, RequestContext, SetAttrs, SetTime, Symlinks,
-    Timestamp, WriteResult, WriteStability, XattrSetMode, Xattrs,
+    HardLinks, MAX_PERSISTENT_HANDLE_LEN, ObjectType, OpenLifecycle, PersistentHandles, ReadResult,
+    RequestContext, SetAttrs, SetTime, Symlinks, Timestamp, WriteResult, WriteStability,
+    XattrSetMode, Xattrs,
 };
 pub use identity::NfsServerIdentity;
 pub use memfs::MemFs;

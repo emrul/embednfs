@@ -956,3 +956,165 @@ impl FileSystem for DelayedLookupFs {
         self.inner.setattr(ctx, handle, attrs).await
     }
 }
+
+/// A [`MemFs`] shared between server instances, with restart-surviving
+/// filehandles.
+///
+/// Two `NfsServer`s built over clones of one of these stand in for two boots
+/// of a server whose backend is durable: the second "boot" has fresh protocol
+/// state but the same objects. MemFs ids are never reused, so an id that
+/// still exists is still the object it named.
+#[derive(Clone)]
+pub struct PersistentMemFs {
+    pub inner: Arc<MemFs>,
+    /// While set, decoding answers `Delay`, as a backend still opening its
+    /// storage after a restart would.
+    pub decode_delayed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PersistentMemFs {
+    pub fn new(inner: MemFs) -> Self {
+        Self {
+            inner: Arc::new(inner),
+            decode_delayed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl embednfs::PersistentHandles<u64> for PersistentMemFs {
+    fn encode_handle(&self, handle: &u64) -> Option<Vec<u8>> {
+        Some(handle.to_be_bytes().to_vec())
+    }
+
+    async fn decode_handle(&self, bytes: &[u8]) -> FsResult<u64> {
+        if self.decode_delayed.load(Ordering::SeqCst) {
+            return Err(FsError::Delay);
+        }
+        let id = u64::from_be_bytes(bytes.try_into().map_err(|_| FsError::Stale)?);
+        let _ = self
+            .inner
+            .getattr(&RequestContext::anonymous(), &id)
+            .await
+            .map_err(|_| FsError::Stale)?;
+        Ok(id)
+    }
+}
+
+#[async_trait::async_trait]
+impl FileSystem for PersistentMemFs {
+    type Handle = u64;
+
+    fn root(&self) -> Self::Handle {
+        self.inner.root()
+    }
+    fn capabilities(&self) -> embednfs::FsCapabilities {
+        self.inner.capabilities()
+    }
+    fn limits(&self) -> embednfs::FsLimits {
+        self.inner.limits()
+    }
+    async fn statfs(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<FsStats> {
+        self.inner.statfs(ctx, handle).await
+    }
+    async fn getattr(&self, ctx: &RequestContext, handle: &Self::Handle) -> FsResult<Attrs> {
+        self.inner.getattr(ctx, handle).await
+    }
+    async fn access(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        requested: AccessMask,
+    ) -> FsResult<AccessMask> {
+        self.inner.access(ctx, handle, requested).await
+    }
+    async fn lookup(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+    ) -> FsResult<Self::Handle> {
+        self.inner.lookup(ctx, parent, name).await
+    }
+    async fn parent(
+        &self,
+        ctx: &RequestContext,
+        dir: &Self::Handle,
+    ) -> FsResult<Option<Self::Handle>> {
+        self.inner.parent(ctx, dir).await
+    }
+    async fn readdir(
+        &self,
+        ctx: &RequestContext,
+        dir: &Self::Handle,
+        cookie: u64,
+        max_entries: u32,
+        with_attrs: bool,
+    ) -> FsResult<DirPage<Self::Handle>> {
+        self.inner
+            .readdir(ctx, dir, cookie, max_entries, with_attrs)
+            .await
+    }
+    async fn read(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        offset: u64,
+        count: u32,
+    ) -> FsResult<ReadResult> {
+        self.inner.read(ctx, handle, offset, count).await
+    }
+    async fn write(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        offset: u64,
+        data: Bytes,
+        requested: WriteStability,
+    ) -> FsResult<WriteResult> {
+        self.inner.write(ctx, handle, offset, data, requested).await
+    }
+    async fn create(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+        req: CreateRequest,
+    ) -> FsResult<CreateResult<Self::Handle>> {
+        self.inner.create(ctx, parent, name, req).await
+    }
+    async fn remove(
+        &self,
+        ctx: &RequestContext,
+        parent: &Self::Handle,
+        name: &str,
+    ) -> FsResult<()> {
+        self.inner.remove(ctx, parent, name).await
+    }
+    async fn rename(
+        &self,
+        ctx: &RequestContext,
+        from_dir: &Self::Handle,
+        from_name: &str,
+        to_dir: &Self::Handle,
+        to_name: &str,
+    ) -> FsResult<()> {
+        self.inner
+            .rename(ctx, from_dir, from_name, to_dir, to_name)
+            .await
+    }
+    async fn setattr(
+        &self,
+        ctx: &RequestContext,
+        handle: &Self::Handle,
+        attrs: &SetAttrs,
+    ) -> FsResult<Attrs> {
+        self.inner.setattr(ctx, handle, attrs).await
+    }
+    fn commit_support(&self) -> Option<&dyn CommitSupport<Self::Handle>> {
+        self.inner.commit_support()
+    }
+    fn persistent_handles(&self) -> Option<&dyn embednfs::PersistentHandles<Self::Handle>> {
+        Some(self)
+    }
+}

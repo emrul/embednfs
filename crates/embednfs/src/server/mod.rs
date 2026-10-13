@@ -344,12 +344,13 @@ impl<F: FileSystem> NfsServer<F> {
 
     /// Cheap shape check before a filehandle is looked up.
     ///
-    /// Must track the layout minted by `StateManager::object_to_fh` — a boot
-    /// nonce followed by a counter. Hardcoding a width here once meant a
+    /// Must track the layouts minted by `StateManager::object_to_fh` — a boot
+    /// nonce followed by a counter, or a tagged persistent encoding. Hardcoding a width here once meant a
     /// well-formed handle was rejected as malformed when that layout changed,
     /// so it reads the shared constant rather than restating the size.
     fn fh_has_valid_format(fh: &NfsFh4) -> bool {
         fh.0.len() == crate::session::FH_LEN
+            || crate::session::StateManager::persistent_fh_body(fh).is_some()
     }
 
     fn parse_auth_sys(body: &Bytes) -> Option<AuthSysParams> {

@@ -80,6 +80,11 @@ pub(crate) use stateids::{CurrentStateidMode, NormalizedStateid};
 pub(crate) const FH_NONCE_LEN: usize = 8;
 /// Total opaque filehandle length: boot nonce plus a big-endian counter.
 pub(crate) const FH_LEN: usize = FH_NONCE_LEN + 8;
+/// First byte of a persistent filehandle: `[tag | backend encoding]`.
+///
+/// A boot nonce never starts with it (see `new_fh_boot_nonce`), so the two
+/// layouts cannot be confused whatever their lengths.
+pub(crate) const PERSISTENT_FH_TAG: u8 = 0xA5;
 
 /// A fresh random filehandle prefix for this server boot.
 ///
@@ -97,6 +102,10 @@ fn new_fh_boot_nonce() -> [u8; FH_NONCE_LEN] {
         );
         tracing::warn!("OS RNG unavailable; filehandle boot nonce fell back to the clock");
     }
+    // Keep the boot-scoped layout disjoint from the persistent one.
+    if nonce[0] == PERSISTENT_FH_TAG {
+        nonce[0] ^= 1;
+    }
     nonce
 }
 
@@ -106,6 +115,9 @@ pub(crate) struct StateManager {
     /// Lock-free file handle mappings (hot path).
     fh_to_object: DashMap<Vec<u8>, ServerObject>,
     object_to_fh: DashMap<ServerObject, Vec<u8>>,
+    /// Backend-supplied durable encodings, recorded when an object is first
+    /// registered. Minting prefers these over a boot-scoped handle.
+    persistent_fh: DashMap<crate::internal::ObjectId, Vec<u8>>,
     /// Objects the backend has retired. Permanent.
     ///
     /// Dropping the state for a retired object is a one-time sweep, and a
@@ -187,6 +199,7 @@ impl StateManager {
             })),
             fh_to_object: DashMap::new(),
             object_to_fh: DashMap::new(),
+            persistent_fh: DashMap::new(),
             retired_objects: Arc::new(DashSet::new()),
             #[cfg(test)]
             retire_probe: std::sync::Mutex::new(None),

@@ -118,10 +118,19 @@ for runtime lifecycle operations on a running server:
 - **`recall_directory(handle)`** recalls directory delegations before an
   external namespace mutation (see the directory-delegations section above).
 
-Filehandles are boot-scoped: each server start mints a random boot nonce that
-prefixes every filehandle, so a handle from a previous boot is unrepresentable
-in the current one and fails with `NFS4ERR_STALE` instead of silently resolving
-to an unrelated object.
+Filehandles are boot-scoped by default: each server start mints a random boot
+nonce that prefixes every filehandle, so a handle from a previous boot is
+unrepresentable in the current one and fails with `NFS4ERR_STALE` instead of
+silently resolving to an unrelated object.
+
+A backend that can name its objects durably implements `PersistentHandles`
+(returned from `FileSystem::persistent_handles`). Its objects then get tagged
+filehandles carrying the backend's encoding, and a handle this boot has not
+seen is passed to `decode_handle`, which decides whether it still names a live
+object (`Stale` if not, `Delay` if it cannot tell yet). That lets a client ride
+out a server restart through ordinary NFSv4.1 recovery — reconnect, new
+session, `CLAIM_PREVIOUS` reclaim — instead of remounting. Retirement fences
+still apply to decoded handles.
 
 ```rust
 let server = NfsServer::new(fs);
