@@ -403,13 +403,23 @@ pub fn encode_open_nocreate(name: &str) -> Vec<u8> {
 }
 
 pub fn encode_open_nocreate_with_access(name: &str, share_access: u32, share_deny: u32) -> Vec<u8> {
+    encode_open_nocreate_as(name, b"test-open-owner", share_access, share_deny)
+}
+
+/// OPEN (no create, CLAIM_NULL) of `name` by the open-owner `owner`.
+pub fn encode_open_nocreate_as(
+    name: &str,
+    owner: &[u8],
+    share_access: u32,
+    share_deny: u32,
+) -> Vec<u8> {
     let mut buf = BytesMut::new();
     OP_OPEN.encode(&mut buf);
     0u32.encode(&mut buf);
     share_access.encode(&mut buf);
     share_deny.encode(&mut buf);
     1u64.encode(&mut buf);
-    encode_opaque(&mut buf, b"test-open-owner");
+    encode_opaque(&mut buf, owner);
     0u32.encode(&mut buf);
     0u32.encode(&mut buf);
     name.to_string().encode(&mut buf);

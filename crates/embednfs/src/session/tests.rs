@@ -74,7 +74,7 @@ async fn setup_open_state(
     state
         .create_open_state(
             object,
-            clientid,
+            &crate::session::test_open_owner(clientid),
             OPEN4_SHARE_ACCESS_BOTH,
             OPEN4_SHARE_DENY_NONE,
         )
@@ -507,7 +507,7 @@ async fn test_expired_client_conflicts_are_reaped_for_other_clients() {
     let _open_stateid = state
         .create_open_state(
             object.clone(),
-            client.clientid,
+            &crate::session::test_open_owner(client.clientid),
             OPEN4_SHARE_ACCESS_READ,
             OPEN4_SHARE_DENY_WRITE,
         )
@@ -538,7 +538,12 @@ async fn test_create_open_state_rejects_malformed_share() {
     // not be authorized against any later READ/WRITE.
     assert!(matches!(
         state
-            .create_open_state(object.clone(), 1, 0, OPEN4_SHARE_DENY_NONE)
+            .create_open_state(
+                object.clone(),
+                &crate::session::test_open_owner(1),
+                0,
+                OPEN4_SHARE_DENY_NONE
+            )
             .await,
         Err(NfsStat4::Inval)
     ));
@@ -546,7 +551,12 @@ async fn test_create_open_state_rejects_malformed_share() {
     // An out-of-range share_deny must be rejected.
     assert!(matches!(
         state
-            .create_open_state(object.clone(), 1, OPEN4_SHARE_ACCESS_READ, 0x4)
+            .create_open_state(
+                object.clone(),
+                &crate::session::test_open_owner(1),
+                OPEN4_SHARE_ACCESS_READ,
+                0x4
+            )
             .await,
         Err(NfsStat4::Inval)
     ));
@@ -554,7 +564,12 @@ async fn test_create_open_state_rejects_malformed_share() {
     // A well-formed share still succeeds.
     assert!(
         state
-            .create_open_state(object, 1, OPEN4_SHARE_ACCESS_BOTH, OPEN4_SHARE_DENY_NONE)
+            .create_open_state(
+                object,
+                &crate::session::test_open_owner(1),
+                OPEN4_SHARE_ACCESS_BOTH,
+                OPEN4_SHARE_DENY_NONE
+            )
             .await
             .is_ok()
     );

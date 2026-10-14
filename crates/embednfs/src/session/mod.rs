@@ -223,3 +223,12 @@ impl Default for StateManager {
         Self::new()
     }
 }
+
+/// An open-owner for unit tests that drive [`StateManager`] directly.
+#[cfg(test)]
+pub(crate) fn test_open_owner(clientid: embednfs_proto::Clientid4) -> embednfs_proto::StateOwner4 {
+    embednfs_proto::StateOwner4 {
+        clientid,
+        owner: bytes::Bytes::from_static(b"test-open-owner"),
+    }
+}

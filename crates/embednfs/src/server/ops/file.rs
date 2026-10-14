@@ -550,7 +550,7 @@ impl<F: FileSystem> NfsServer<F> {
             .state
             .create_open_state(
                 object.clone(),
-                args.owner.clientid,
+                &args.owner,
                 args.share_access,
                 args.share_deny,
             )

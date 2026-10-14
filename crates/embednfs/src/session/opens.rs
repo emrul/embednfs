@@ -1,7 +1,7 @@
 use embednfs_proto::{
-    Clientid4, NfsStat4, OPEN4_SHARE_ACCESS_BOTH, OPEN4_SHARE_ACCESS_READ,
-    OPEN4_SHARE_ACCESS_WANT_DELEG_MASK, OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_BOTH,
-    OPEN4_SHARE_DENY_NONE, OPEN4_SHARE_DENY_READ, OPEN4_SHARE_DENY_WRITE, Stateid4,
+    NfsStat4, OPEN4_SHARE_ACCESS_BOTH, OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_ACCESS_WANT_DELEG_MASK,
+    OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_BOTH, OPEN4_SHARE_DENY_NONE, OPEN4_SHARE_DENY_READ,
+    OPEN4_SHARE_DENY_WRITE, StateOwner4, Stateid4,
 };
 
 use crate::internal::ServerObject;
@@ -35,14 +35,24 @@ impl StateManager {
         })
     }
 
-    /// Create an open state for an object.
+    /// Create an open state for an object, or upgrade the owner's existing one.
+    ///
+    /// An open is keyed by (client, open-owner, object). A repeat OPEN by the
+    /// same owner returns the **same** stateid `other` with a bumped seqid and
+    /// the union of the share access and deny (RFC 8881 §18.16.3, §9.11).
+    /// Clients depend on this: the Linux client keeps one open state per
+    /// (owner, file), so a second process of the same user opening for READ
+    /// while a writer is open must not be handed a fresh read-only stateid,
+    /// or the client sends its WRITEs on that stateid and loops on
+    /// `NFS4ERR_OPENMODE` forever.
     pub(crate) async fn create_open_state(
         &self,
         object: ServerObject,
-        clientid: Clientid4,
+        owner: &StateOwner4,
         share_access: u32,
         share_deny: u32,
     ) -> Result<Stateid4, NfsStat4> {
+        let clientid = owner.clientid;
         // The retired check lives **inside** the write guard below, not here:
         // the invalidation sweep takes that same guard, so checking outside it
         // leaves a window where a retirement can mark and sweep between the
@@ -72,16 +82,46 @@ impl StateManager {
             return Err(NfsStat4::Stale);
         }
 
-        for state in inner.open_files.values() {
-            if !state.active {
+        let existing = inner
+            .open_files
+            .iter()
+            .find(|(_, state)| {
+                state.active
+                    && state.object == object
+                    && state.clientid == clientid
+                    && state.owner == owner.owner
+            })
+            .map(|(other, state)| (*other, state.share_access, state.share_deny));
+        // Share reservations are checked against the union the owner will
+        // hold, but never against the owner's own open.
+        let (want_access, want_deny) = match existing {
+            Some((_, access, deny)) => (access | share_access, deny | share_deny),
+            None => (share_access, share_deny),
+        };
+        let own_other = existing.map(|(other, _, _)| other);
+        for (other, state) in &inner.open_files {
+            if !state.active || Some(*other) == own_other {
                 continue;
             }
             if state.object == object
-                && ((state.share_deny & share_access) != 0
-                    || (share_deny & state.share_access) != 0)
+                && ((state.share_deny & want_access) != 0 || (want_deny & state.share_access) != 0)
             {
                 return Err(NfsStat4::ShareDenied);
             }
+        }
+
+        if let Some(other) = own_other {
+            let state = inner
+                .open_files
+                .get_mut(&other)
+                .ok_or(NfsStat4::Serverfault)?;
+            state.share_access = want_access;
+            state.share_deny = want_deny;
+            state.stateid_seq = state.stateid_seq.wrapping_add(1);
+            return Ok(Stateid4 {
+                seqid: state.stateid_seq,
+                other,
+            });
         }
 
         let seq = self
@@ -96,6 +136,7 @@ impl StateManager {
             OpenFileState {
                 object,
                 clientid,
+                owner: owner.owner.clone(),
                 stateid_seq: 1,
                 active: true,
                 share_access,

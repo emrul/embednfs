@@ -228,6 +228,10 @@ pub(crate) enum SequenceReplay {
 pub(super) struct OpenFileState {
     pub object: ServerObject,
     pub clientid: Clientid4,
+    /// The open-owner's opaque name. Together with `clientid` and `object` it
+    /// keys the open: a repeat OPEN by the same owner upgrades this state
+    /// instead of minting a second stateid (RFC 8881 §18.16.3).
+    pub owner: bytes::Bytes,
     pub stateid_seq: u32,
     pub active: bool,
     pub share_access: u32,

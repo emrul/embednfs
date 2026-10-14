@@ -11,5 +11,6 @@ use crate::common::*;
 mod attrs_state;
 mod auth_policy;
 mod lifecycle;
+mod open_owner;
 mod secinfo_verify;
 mod xattrs;

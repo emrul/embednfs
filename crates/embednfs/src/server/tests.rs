@@ -229,7 +229,7 @@ mod retirement_fence {
         assert!(
             server
                 .state
-                .create_open_state(object.clone(), 1, 1, 0)
+                .create_open_state(object.clone(), &crate::session::test_open_owner(1), 1, 0)
                 .await
                 .is_err(),
             "an OPEN must not be created for a retired object",

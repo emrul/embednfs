@@ -357,7 +357,12 @@ mod tests {
         });
 
         let result = state
-            .create_open_state(ServerObject::Fs(1), 1, OPEN4_SHARE_ACCESS_READ, 0)
+            .create_open_state(
+                ServerObject::Fs(1),
+                &crate::session::test_open_owner(1),
+                OPEN4_SHARE_ACCESS_READ,
+                0,
+            )
             .await;
         assert_eq!(
             result.err(),
@@ -379,7 +384,12 @@ mod tests {
         let state = StateManager::new();
         let object = ServerObject::Fs(1);
         let open = state
-            .create_open_state(object.clone(), 1, OPEN4_SHARE_ACCESS_READ, 0)
+            .create_open_state(
+                object.clone(),
+                &crate::session::test_open_owner(1),
+                OPEN4_SHARE_ACCESS_READ,
+                0,
+            )
             .await
             .expect("the open predates the retirement");
 
@@ -439,7 +449,12 @@ mod tests {
         assert!(state.object_to_fh(&ServerObject::Fs(2)).is_some());
         assert!(
             state
-                .create_open_state(ServerObject::Fs(2), 1, OPEN4_SHARE_ACCESS_READ, 0)
+                .create_open_state(
+                    ServerObject::Fs(2),
+                    &crate::session::test_open_owner(1),
+                    OPEN4_SHARE_ACCESS_READ,
+                    0
+                )
                 .await
                 .is_ok(),
         );
